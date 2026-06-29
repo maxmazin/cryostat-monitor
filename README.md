@@ -1,5 +1,7 @@
 # cryostat-monitor
 
+[![CI](https://github.com/maxmazin/cryostat-monitor/actions/workflows/ci.yml/badge.svg)](https://github.com/maxmazin/cryostat-monitor/actions/workflows/ci.yml)
+
 Temperature monitoring & alerting for the lab's five cryostats (dilution refrigerators and ADRs).
 
 Ships each fridge's logged readings to a central PostgreSQL database every ~30 s, acts as a **watchdog** that alerts Slack when a parameter goes out of range **or when a fridge stops reporting**, tolerates network/host outages without losing data, and exposes conversational status/mute via OpenClaw — without putting the LLM agent in the safety-critical alert path.
