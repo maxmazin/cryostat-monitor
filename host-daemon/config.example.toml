@@ -1,0 +1,11 @@
+# Per-host daemon config (§6). Copy to config.toml on each fridge host and
+# fill in. config.toml is gitignored — it holds the per-host bearer token.
+
+fridge        = "bluefors_1"
+parser        = "bluefors_1"                       # module in parsers/
+log_glob      = "C:/BlueFors/logs/*/CH*.log"       # confirm per fridge (§11 Q5)
+poll_interval = 30                                  # seconds
+server_url    = "https://labmanager.<tailnet>.ts.net/ingest"
+token         = "<per-host bearer token>"           # unique per host
+timezone      = "America/Los_Angeles"               # confirm per fridge
+spool_path    = "spool.sqlite"

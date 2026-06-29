@@ -1,0 +1,18 @@
+[Unit]
+Description=cryostat-monitor ingest service (FastAPI)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cryo
+WorkingDirectory=/opt/cryostat-monitor/server
+EnvironmentFile=/etc/cryostat-monitor/ingest.env
+# Bind to the LAN/tailnet interface only, never 0.0.0.0 on the public internet.
+ExecStart=/opt/cryostat-monitor/server/.venv/bin/uvicorn ingest.app:app \
+    --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,46 @@
+# Watchdog & channel configuration (§3.3: thresholds and intervals live in
+# config, not code, so they can be tuned without redeploying).
+#
+# Units: temperatures in kelvin, pressures in mbar (canonical, see schema.sql).
+# A channel with only `high` set alerts when value > high; only `low` set
+# alerts when value < low; both set means alert outside [low, high].
+#
+# staleness: a fridge is SILENT when
+#     now() - last_seen > staleness_factor * poll_interval
+# poll_interval is the host daemon's reporting cadence in seconds.
+
+watchdog:
+  check_interval: 15          # seconds between watchdog loops
+  reminder_interval: 1800     # seconds between repeat notifications while ALERTING
+  healthchecks_url: "https://hc-ping.com/REPLACE-WITH-UUID"
+
+slack:
+  # Dedicated incoming webhook, SEPARATE from OpenClaw's bot (§2.1).
+  # Load from env in production; do not commit the real URL.
+  webhook_url_env: "CRYO_ALERT_SLACK_WEBHOOK"
+
+fridges:
+  bluefors_1:
+    poll_interval: 30
+    staleness_factor: 4       # SILENT after ~120 s of no data
+    timezone: "America/Los_Angeles"
+    channels:
+      "50K":   { high: 70.0 }
+      "4K":    { high: 5.5 }
+      "still": { high: 1.5 }
+      "MXC":   { high: 0.050 }
+      "P_still": { high: 1.0, unit: "mbar" }
+
+  # ADRs differ: no still/MXC; expect magnet/regen channels and deliberate
+  # warmups (handle via maintenance mutes — see §11 Q4).
+  adr_2:
+    poll_interval: 30
+    staleness_factor: 4
+    timezone: "America/Los_Angeles"
+    channels:
+      "50K":  { high: 70.0 }
+      "4K":   { high: 5.5 }
+      "GGG":  { high: 0.100 }
+      "FAA":  { high: 0.100 }
+
+  # bluefors_3, adr_4, fridge_5: add once per-fridge log samples land (§11 Q5).

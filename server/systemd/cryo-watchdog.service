@@ -1,0 +1,17 @@
+[Unit]
+Description=cryostat-monitor watchdog (deterministic alert path)
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cryo
+WorkingDirectory=/opt/cryostat-monitor/server
+EnvironmentFile=/etc/cryostat-monitor/watchdog.env
+ExecStart=/opt/cryostat-monitor/server/.venv/bin/python watchdog/watchdog.py
+# Keep it alive aggressively — a dead watchdog is a silent monitor.
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

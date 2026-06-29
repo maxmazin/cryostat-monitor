@@ -1,0 +1,3 @@
+# Host daemon runs on Windows, Python 3.11+ (tomllib is stdlib on 3.11+).
+requests>=2.31
+tzdata>=2024.1   # ZoneInfo data on Windows
