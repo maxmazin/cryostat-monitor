@@ -1,0 +1,29 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Local config & secrets (tokens, webhooks)
+config.toml
+*.local.toml
+*.local.yaml
+.env
+*.env
+
+# Local SQLite spool
+*.sqlite
+*.sqlite3
+*.db
+
+# Logs
+*.log
+
+# Editor
+.idea/
+.vscode/
