@@ -35,6 +35,67 @@ cryostat-monitor/
   README.md
 ```
 
+## Running the ingest service (Phase 0)
+
+Phase 0 is complete: the FastAPI ingest service persists readings to PostgreSQL
+with idempotent inserts, advances `last_seen`, enforces per-host token auth, and
+exposes the capped `/maintenance` endpoint.
+
+### On labmanager (production target)
+
+```bash
+# 1. PostgreSQL: create the database and apply the schema
+createdb cryo
+psql -d cryo -f server/db/schema.sql
+# grant the app role write access to the data tables
+psql -d cryo -c "GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA public TO cryo;"
+
+# 2. Python env
+python3 -m venv .venv && . .venv/bin/activate
+pip install -r server/requirements.txt
+
+# 3. Configure (copy and edit; .env is gitignored)
+cp server/.env.example server/.env     # set CRYO_DB_DSN and CRYO_TOKENS
+
+# 4. Run (systemd unit in server/systemd/cryo-ingest.service)
+cd server && set -a && . ./.env && set +a
+uvicorn ingest.app:app --host 127.0.0.1 --port 8000
+```
+
+Configuration is entirely via environment variables — see `server/.env.example`.
+
+### Local dev (Mac, Homebrew)
+
+`scripts/dev_local.sh` stands up a throwaway Postgres cluster + venv and runs the
+service, so you can exercise the full path without touching a real database:
+
+```bash
+brew install postgresql@16
+./scripts/dev_local.sh up        # init cluster, apply schema, start ingest
+./scripts/dev_local.sh verify    # Phase 0 acceptance check (see below)
+./scripts/dev_local.sh down      # stop everything
+```
+
+### Acceptance check
+
+`scripts/verify_phase0.sh` proves the §10 Phase 0 criterion — a POST of one fake
+reading lands a row — and additionally checks idempotency on re-POST:
+
+```
+1. health check            -> {"status":"ok"}
+2. POST one fake reading    -> {"received":1,"inserted":1}
+3. POST it again            -> {"received":1,"inserted":0}   # ON CONFLICT DO NOTHING
+4. row present in readings; last_seen advanced
+```
+
 ## Status
 
-Design agreed; implementation not yet started. See §10 of the spec for the phased plan and acceptance criteria, and §11 for open questions pending from Ben.
+- **Phase 0 — Environment: done.** Schema, roles, FastAPI ingest persisting to
+  Postgres, idempotent writes, token auth, capped `/maintenance`. Verified
+  end-to-end locally (`verify_phase0.sh`).
+- **Phase 1 — One fridge end-to-end:** next. Implement the ugliest fridge's
+  parser plus the host daemon's spool and log-rotation handling. Needs the
+  per-fridge log samples (§11 Q5).
+
+See §10 of the spec for the full phased plan and §11 for open questions pending
+from Ben.

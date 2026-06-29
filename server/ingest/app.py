@@ -1,31 +1,62 @@
-"""Ingest service (FastAPI on labmanager).
+"""Ingest service (FastAPI on labmanager). See §7 of the spec.
 
-Single data endpoint plus a constrained maintenance endpoint. See §7 of the
-spec. This is a skeleton: the structure, data contract, and idempotency
-guarantees are in place; DB wiring is marked TODO.
+Single data endpoint plus a constrained maintenance endpoint. Phase 0: the
+data path is fully wired to PostgreSQL with idempotent inserts.
 
 Run behind systemd via uvicorn, bound to the LAN/tailnet interface only
 (not the public internet).
+
+Configuration (env vars):
+  CRYO_DB_DSN                 postgresql://cryo@127.0.0.1:5432/cryo
+  CRYO_TOKENS                 JSON object {"<bearer-token>": "<fridge>"}   (or)
+  CRYO_TOKENS_FILE            path to a JSON file with the same shape
+  CRYO_MAX_MAINTENANCE_MINUTES  cap on maintenance duration (default 720)
 """
 from __future__ import annotations
 
+import json
 import os
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
-app = FastAPI(title="cryostat-monitor ingest")
+from . import db
 
-# Per-host bearer tokens → fridge name. Load from env/secret store in
-# production; never hard-code real tokens. A host can only write its own data.
-TOKENS: dict[str, str] = {
-    # "<token>": "bluefors_1",
-}
 
-# Cap accepted maintenance duration (§7). OpenClaw can request a mute but
-# cannot disable the watchdog indefinitely.
+def _load_tokens() -> dict[str, str]:
+    """Per-host bearer tokens -> fridge name. A host can only write its own data."""
+    raw = os.environ.get("CRYO_TOKENS")
+    if not raw:
+        path = os.environ.get("CRYO_TOKENS_FILE")
+        if path:
+            with open(path) as fh:
+                raw = fh.read()
+    if not raw:
+        return {}
+    return json.loads(raw)
+
+
+TOKENS: dict[str, str] = {}
+
+# Cap accepted maintenance duration (§7). OpenClaw can request a mute but cannot
+# disable the watchdog indefinitely.
 MAX_MAINTENANCE_MINUTES = int(os.environ.get("CRYO_MAX_MAINTENANCE_MINUTES", "720"))
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global TOKENS
+    TOKENS = _load_tokens()
+    db.init_pool()
+    try:
+        yield
+    finally:
+        db.close_pool()
+
+
+app = FastAPI(title="cryostat-monitor ingest", lifespan=lifespan)
 
 
 # --------------------------------------------------------------------------- models
@@ -81,20 +112,15 @@ def ingest(body: IngestBody, fridge: str = Depends(fridge_for_token)) -> dict:
         for r in body.readings
     ]
 
-    # TODO: bulk insert into `readings` with
-    #   ON CONFLICT (fridge, channel, ts) DO NOTHING   -- idempotent (§3.2)
-    # then UPDATE last_seen with max(ts) from the batch (§7.3).
-    inserted = len(rows)  # placeholder until DB is wired
-
-    return {"inserted": inserted}
+    inserted = db.insert_readings(body.fridge, rows)
+    return {"received": len(rows), "inserted": inserted}
 
 
 @app.post("/maintenance")
 def maintenance(body: MaintenanceBody) -> dict:
     # The only write OpenClaw is allowed; duration is capped server-side (§7).
     minutes = min(body.minutes, MAX_MAINTENANCE_MINUTES)
-    # TODO: INSERT INTO maintenance (fridge, until_ts, reason, set_by)
-    #       VALUES (body.fridge, now() + minutes, body.reason, body.set_by)
+    db.insert_maintenance(body.fridge, minutes, body.reason, body.set_by)
     return {
         "fridge": body.fridge,
         "minutes_granted": minutes,
