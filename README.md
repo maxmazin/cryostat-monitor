@@ -73,8 +73,31 @@ service, so you can exercise the full path without touching a real database:
 brew install postgresql@16
 ./scripts/dev_local.sh up        # init cluster, apply schema, start ingest
 ./scripts/dev_local.sh verify    # Phase 0 acceptance check (see below)
+./scripts/dev_local.sh test      # run the pytest suite against the dev DB
 ./scripts/dev_local.sh down      # stop everything
 ```
+
+### Tests
+
+Unit tests (FastAPI `TestClient`, DB layer faked) cover auth, the timezone
+contract, non-finite filtering, and the maintenance endpoint. They need no
+database:
+
+```bash
+cd server
+pip install -r requirements.txt -r requirements-dev.txt
+pytest                           # unit tests; integration tests auto-skip
+```
+
+Integration tests exercise the real idempotent insert and `last_seen` logic
+against PostgreSQL; point `CRYO_TEST_DSN` at a schema-applied test database (the
+connecting role needs DELETE for row cleanup):
+
+```bash
+CRYO_TEST_DSN=postgresql://cryo@127.0.0.1:54329/cryo pytest
+```
+
+`./scripts/dev_local.sh test` wires all of this up against the throwaway dev DB.
 
 ### Acceptance check
 

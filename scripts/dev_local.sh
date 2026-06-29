@@ -63,8 +63,10 @@ up() {
     psql -h 127.0.0.1 -p "$PORT" -d cryo -c \
         "DO \$\$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='cryo') THEN CREATE ROLE cryo LOGIN; END IF; END \$\$;"
     psql -h 127.0.0.1 -p "$PORT" -d cryo -f "$REPO/server/db/schema.sql" >/dev/null
+    # Production grants the app role only SELECT/INSERT/UPDATE (see README); the
+    # dev/test cluster also grants DELETE so integration tests can clean up rows.
     psql -h 127.0.0.1 -p "$PORT" -d cryo -c \
-        "GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA public TO cryo;" >/dev/null
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO cryo;" >/dev/null
 
     # Reinstall if the venv is missing OR incomplete (a half-built venv from an
     # interrupted run has the dir but no uvicorn binary).
@@ -112,9 +114,17 @@ down() {
 
 verify() { "$REPO/scripts/verify_phase0.sh"; }
 
+# Run the pytest suite (unit + integration) against the dev cluster.
+run_tests() {
+    up >/dev/null
+    "$VENV/bin/pip" install -q -r "$REPO/server/requirements-dev.txt"
+    CRYO_TEST_DSN="$CRYO_DB_DSN" "$VENV/bin/pytest" "$REPO/server" "$@"
+}
+
 case "${1:-}" in
     up) up ;;
     down) down ;;
     verify) verify ;;
-    *) echo "usage: $0 {up|verify|down}"; exit 1 ;;
+    test) shift; run_tests "$@" ;;
+    *) echo "usage: $0 {up|verify|test|down}"; exit 1 ;;
 esac
