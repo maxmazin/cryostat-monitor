@@ -11,6 +11,10 @@
 #   ./scripts/verify_phase0.sh
 set -euo pipefail
 
+# Fail early with a clear message rather than an opaque 'unbound variable' from
+# `set -u` at the psql step after the POSTs have already run.
+: "${CRYO_DB_DSN:?set CRYO_DB_DSN, e.g. postgresql://cryo@127.0.0.1:5432/cryo}"
+
 INGEST_URL="${INGEST_URL:-http://127.0.0.1:8000}"
 TOKEN="${TOKEN:-dev-token-bluefors_1}"
 TS="2026-06-29T19:00:00Z"

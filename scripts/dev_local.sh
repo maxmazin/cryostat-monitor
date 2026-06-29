@@ -4,9 +4,12 @@
 # and systemd (see server/systemd/). Data dir and venv live under $WORKDIR and
 # can be deleted freely.
 #
-#   ./scripts/dev_local.sh up      # init cluster, apply schema, start ingest
+#   ./scripts/dev_local.sh up      # init cluster, apply schema, (re)start ingest
 #   ./scripts/dev_local.sh verify  # run the Phase 0 acceptance check
-#   ./scripts/dev_local.sh down     # stop everything
+#   ./scripts/dev_local.sh down    # stop everything
+#
+# `up` is idempotent: re-running it reuses a running cluster and restarts the
+# ingest service cleanly.
 set -euo pipefail
 
 PGBIN="$(brew --prefix)/opt/postgresql@16/bin"
@@ -17,20 +20,45 @@ WORKDIR="${CRYO_DEV_WORKDIR:-/tmp/cryo-dev}"
 PGDATA="$WORKDIR/pgdata"
 SOCK="/tmp/cryopg"          # short path: PG unix sockets cap at 103 bytes
 VENV="$WORKDIR/venv"
+PIDFILE="$WORKDIR/uvicorn.pid"
 PORT="${CRYO_DEV_PGPORT:-54329}"
+INGEST_HOST=127.0.0.1
+INGEST_PORT="${CRYO_DEV_INGEST_PORT:-8000}"
 
 export CRYO_DB_DSN="postgresql://cryo@127.0.0.1:$PORT/cryo"
 export CRYO_TOKENS='{"dev-token-bluefors_1":"bluefors_1"}'
+export CRYO_MAINTENANCE_TOKENS='["dev-maintenance-token"]'
 export TOKEN="dev-token-bluefors_1"
+# Exported so verify_phase0.sh works whether invoked via `verify` or directly.
+export INGEST_URL="http://$INGEST_HOST:$INGEST_PORT"
+
+pg_running() { pg_isready -h 127.0.0.1 -p "$PORT" -q; }
+
+# Kill anything bound to the ingest port (a stale uvicorn from a prior run);
+# otherwise the health poll could succeed against old code while the new
+# process exits silently.
+free_ingest_port() {
+    local pids
+    pids="$(lsof -ti "tcp:$INGEST_PORT" 2>/dev/null || true)"
+    if [ -n "$pids" ]; then
+        # shellcheck disable=SC2086
+        kill $pids 2>/dev/null || true
+        sleep 1
+    fi
+}
 
 up() {
-    mkdir -p "$SOCK"
+    mkdir -p "$SOCK" "$WORKDIR"
     if [ ! -d "$PGDATA" ]; then
-        initdb -D "$PGDATA" -U "$USER" --auth=trust >/dev/null
+        initdb -D "$PGDATA" -U "${USER:-postgres}" --auth=trust >/dev/null
     fi
-    pg_ctl -D "$PGDATA" -o "-p $PORT -k $SOCK -c listen_addresses='127.0.0.1'" \
-        -l "$PGDATA/server.log" start
-    sleep 2
+    if ! pg_running; then
+        pg_ctl -D "$PGDATA" -o "-p $PORT -k $SOCK -c listen_addresses='127.0.0.1'" \
+            -l "$PGDATA/server.log" start
+        for _ in $(seq 1 30); do pg_running && break; sleep 1; done
+    fi
+    pg_running || { echo "postgres failed to start; see $PGDATA/server.log" >&2; return 1; }
+
     createdb -h 127.0.0.1 -p "$PORT" cryo 2>/dev/null || true
     psql -h 127.0.0.1 -p "$PORT" -d cryo -c \
         "DO \$\$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='cryo') THEN CREATE ROLE cryo LOGIN; END IF; END \$\$;"
@@ -38,17 +66,31 @@ up() {
     psql -h 127.0.0.1 -p "$PORT" -d cryo -c \
         "GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA public TO cryo;" >/dev/null
 
-    if [ ! -d "$VENV" ]; then
+    # Reinstall if the venv is missing OR incomplete (a half-built venv from an
+    # interrupted run has the dir but no uvicorn binary).
+    if [ ! -x "$VENV/bin/uvicorn" ]; then
         python3 -m venv "$VENV"
         "$VENV/bin/pip" install -q --upgrade pip
         "$VENV/bin/pip" install -q -r "$REPO/server/requirements.txt"
     fi
-    (cd "$REPO/server" && "$VENV/bin/uvicorn" ingest.app:app \
-        --host 127.0.0.1 --port 8000 > "$WORKDIR/uvicorn.log" 2>&1 &)
-    # Poll /health until the service is listening (cold start can take a few s).
+
+    free_ingest_port
+    # Start without a subshell so we can capture the PID and watch it. --app-dir
+    # lets uvicorn import ingest.app without a cd.
+    "$VENV/bin/uvicorn" --app-dir "$REPO/server" ingest.app:app \
+        --host "$INGEST_HOST" --port "$INGEST_PORT" > "$WORKDIR/uvicorn.log" 2>&1 &
+    local pid=$!
+    echo "$pid" > "$PIDFILE"
+
+    # Poll /health, but bail immediately if our process died (don't wait 30s).
     for _ in $(seq 1 30); do
-        if curl -fsS http://127.0.0.1:8000/health >/dev/null 2>&1; then
-            echo "ingest up on http://127.0.0.1:8000  (db port $PORT)"
+        if ! kill -0 "$pid" 2>/dev/null; then
+            echo "ingest process exited during startup; see $WORKDIR/uvicorn.log" >&2
+            tail -20 "$WORKDIR/uvicorn.log" >&2 || true
+            return 1
+        fi
+        if curl -fsS "$INGEST_URL/health" >/dev/null 2>&1; then
+            echo "ingest up on $INGEST_URL (pid $pid, db port $PORT)"
             return 0
         fi
         sleep 1
@@ -59,7 +101,11 @@ up() {
 }
 
 down() {
-    pkill -f "uvicorn ingest.app:app" 2>/dev/null || true
+    if [ -f "$PIDFILE" ]; then
+        kill "$(cat "$PIDFILE")" 2>/dev/null || true
+        rm -f "$PIDFILE"
+    fi
+    free_ingest_port
     pg_ctl -D "$PGDATA" stop -m fast 2>/dev/null || true
     echo "stopped"
 }
