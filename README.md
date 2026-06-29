@@ -122,5 +122,12 @@ reading lands a row — and additionally checks idempotency on re-POST:
   parser plus the host daemon's spool and log-rotation handling. Needs the
   per-fridge log samples (§11 Q5).
 
+Before Phase 1:
+- [`docs/questions-for-ben.md`](./docs/questions-for-ben.md) — open questions
+  reordered by what blocks progress (lead: log samples + pick the ugliest fridge).
+- [`docs/deployment.md`](./docs/deployment.md) — stand the ingest service up on
+  labmanager with TLS and confirm reachability from a fridge host (the real
+  Phase 0 acceptance gate).
+
 See §10 of the spec for the full phased plan and §11 for open questions pending
 from Ben.
