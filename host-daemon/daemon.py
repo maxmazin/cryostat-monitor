@@ -48,7 +48,11 @@ def load_parser(name: str) -> Parser:
     """Import parsers/<name>.py and return its Parser subclass instance."""
     module = importlib.import_module(f"parsers.{name}")
     for obj in vars(module).values():
-        if isinstance(obj, type) and issubclass(obj, Parser) and obj is not Parser:
+        # Only a Parser subclass DEFINED in this module — not one merely imported
+        # into it (e.g. the shared BlueforsParser base), which would otherwise be
+        # returned in place of the fridge-specific subclass.
+        if (isinstance(obj, type) and issubclass(obj, Parser) and obj is not Parser
+                and obj.__module__ == module.__name__):
             return obj()
     raise ValueError(f"no Parser subclass found in parsers.{name}")
 

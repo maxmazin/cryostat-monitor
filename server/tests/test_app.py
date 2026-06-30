@@ -22,19 +22,19 @@ def test_health_ok(client):
 
 # --------------------------------------------------------------------------- ingest auth
 def test_ingest_missing_auth_header_returns_401(client):
-    r = client.post("/ingest", json={"fridge": "bluefors_1", "readings": []})
+    r = client.post("/ingest", json={"fridge": "blackfridge", "readings": []})
     assert r.status_code == 401
 
 
 def test_ingest_invalid_token_returns_401(client):
     r = client.post("/ingest", headers={"Authorization": "Bearer nope"},
-                    json={"fridge": "bluefors_1", "readings": []})
+                    json={"fridge": "blackfridge", "readings": []})
     assert r.status_code == 401
 
 
 def test_ingest_non_bearer_scheme_returns_401(client):
     r = client.post("/ingest", headers={"Authorization": "Token host-token"},
-                    json={"fridge": "bluefors_1", "readings": []})
+                    json={"fridge": "blackfridge", "readings": []})
     assert r.status_code == 401
 
 
@@ -47,7 +47,7 @@ def test_ingest_fridge_must_match_token_returns_403(client):
 # --------------------------------------------------------------------------- ingest happy path
 def test_ingest_accepts_aware_timestamp(client, fake_db):
     r = client.post("/ingest", headers=HOST_AUTH,
-                    json={"fridge": "bluefors_1", "readings": [_reading()]})
+                    json={"fridge": "blackfridge", "readings": [_reading()]})
     assert r.status_code == 200
     assert r.json() == {"received": 1, "inserted": 1, "dropped": 0}
     assert len(fake_db.readings_calls) == 1
@@ -56,7 +56,7 @@ def test_ingest_accepts_aware_timestamp(client, fake_db):
 def test_ingest_converts_offset_timestamp_to_utc(client, fake_db):
     # 21:00 at +02:00 is 19:00 UTC.
     client.post("/ingest", headers=HOST_AUTH, json={
-        "fridge": "bluefors_1",
+        "fridge": "blackfridge",
         "readings": [_reading(ts="2026-06-29T21:00:00+02:00")],
     })
     _, rows = fake_db.readings_calls[0]
@@ -68,7 +68,7 @@ def test_ingest_converts_offset_timestamp_to_utc(client, fake_db):
 def test_ingest_rejects_naive_timestamp_422(client, fake_db):
     # No offset -> naive datetime. Must be rejected loudly, not coerced (§3.6/§12).
     r = client.post("/ingest", headers=HOST_AUTH, json={
-        "fridge": "bluefors_1",
+        "fridge": "blackfridge",
         "readings": [_reading(ts="2026-06-29T19:00:00")],
     })
     assert r.status_code == 422
@@ -83,7 +83,7 @@ _JSON = {**HOST_AUTH, "Content-Type": "application/json"}
 
 def test_ingest_drops_nonfinite_value_keeps_finite(client, fake_db):
     body = (
-        '{"fridge": "bluefors_1", "readings": ['
+        '{"fridge": "blackfridge", "readings": ['
         '{"ts": "2026-06-29T19:00:00Z", "channel": "MXC", "value": NaN, "unit": "K"},'
         '{"ts": "2026-06-29T19:00:00Z", "channel": "4K", "value": 3.9, "unit": "K"}]}'
     )
@@ -97,7 +97,7 @@ def test_ingest_drops_nonfinite_value_keeps_finite(client, fake_db):
 
 def test_ingest_drops_infinity_value(client, fake_db):
     body = (
-        '{"fridge": "bluefors_1", "readings": ['
+        '{"fridge": "blackfridge", "readings": ['
         '{"ts": "2026-06-29T19:00:00Z", "channel": "MXC", "value": Infinity, "unit": "K"}]}'
     )
     r = client.post("/ingest", headers=_JSON, content=body)
@@ -108,29 +108,29 @@ def test_ingest_drops_infinity_value(client, fake_db):
 
 # --------------------------------------------------------------------------- maintenance auth
 def test_maintenance_missing_auth_header_returns_401(client):
-    r = client.post("/maintenance", json={"fridge": "bluefors_1", "minutes": 60})
+    r = client.post("/maintenance", json={"fridge": "blackfridge", "minutes": 60})
     assert r.status_code == 401
 
 
 def test_maintenance_invalid_token_returns_401(client):
     r = client.post("/maintenance", headers={"Authorization": "Bearer nope"},
-                    json={"fridge": "bluefors_1", "minutes": 60})
+                    json={"fridge": "blackfridge", "minutes": 60})
     assert r.status_code == 401
 
 
 def test_maintenance_fail_closed_when_unconfigured_returns_503(client_no_maint):
     # No maintenance tokens configured -> endpoint must refuse, never open (§2.1).
     r = client_no_maint.post("/maintenance", headers={"Authorization": "Bearer anything"},
-                             json={"fridge": "bluefors_1", "minutes": 60})
+                             json={"fridge": "blackfridge", "minutes": 60})
     assert r.status_code == 503
 
 
 # --------------------------------------------------------------------------- maintenance behavior
 def test_maintenance_valid_request_succeeds(client, fake_db):
     r = client.post("/maintenance", headers=MAINT_AUTH,
-                    json={"fridge": "bluefors_1", "minutes": 60, "reason": "regen", "set_by": "ben"})
+                    json={"fridge": "blackfridge", "minutes": 60, "reason": "regen", "set_by": "ben"})
     assert r.status_code == 200
-    assert fake_db.maintenance_calls == [("bluefors_1", 60, "regen", "ben")]
+    assert fake_db.maintenance_calls == [("blackfridge", 60, "regen", "ben")]
 
 
 def test_maintenance_unknown_fridge_returns_404(client, fake_db):
@@ -144,7 +144,7 @@ def test_maintenance_caps_duration_at_default_max(make_client, fake_db):
     # Default cap is 720 minutes when CRYO_MAX_MAINTENANCE_MINUTES is unset.
     client = make_client(max_minutes=None)
     r = client.post("/maintenance", headers=MAINT_AUTH,
-                    json={"fridge": "bluefors_1", "minutes": 9999})
+                    json={"fridge": "blackfridge", "minutes": 9999})
     body = r.json()
     assert body["minutes_granted"] == 720
     assert body["capped"] is True
@@ -155,7 +155,7 @@ def test_maintenance_cap_is_configurable(make_client, fake_db):
     # A non-default cap from the environment is honored (read at startup).
     client = make_client(max_minutes="30")
     r = client.post("/maintenance", headers=MAINT_AUTH,
-                    json={"fridge": "bluefors_1", "minutes": 9999})
+                    json={"fridge": "blackfridge", "minutes": 9999})
     body = r.json()
     assert body["minutes_granted"] == 30
     assert body["capped"] is True
@@ -165,7 +165,7 @@ def test_maintenance_cap_is_configurable(make_client, fake_db):
 def test_maintenance_under_cap_not_capped(make_client, fake_db):
     client = make_client(max_minutes="720")
     r = client.post("/maintenance", headers=MAINT_AUTH,
-                    json={"fridge": "bluefors_1", "minutes": 60})
+                    json={"fridge": "blackfridge", "minutes": 60})
     body = r.json()
     assert body["minutes_granted"] == 60
     assert body["capped"] is False
@@ -173,5 +173,5 @@ def test_maintenance_under_cap_not_capped(make_client, fake_db):
 
 def test_maintenance_rejects_nonpositive_minutes_422(client):
     r = client.post("/maintenance", headers=MAINT_AUTH,
-                    json={"fridge": "bluefors_1", "minutes": 0})
+                    json={"fridge": "blackfridge", "minutes": 0})
     assert r.status_code == 422

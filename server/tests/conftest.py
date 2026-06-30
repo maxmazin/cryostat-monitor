@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 from ingest import app as app_module
 from ingest import db
 
-DEFAULT_TOKENS = '{"host-token": "bluefors_1"}'
+DEFAULT_TOKENS = '{"host-token": "blackfridge"}'
 DEFAULT_MAINTENANCE_TOKENS = '["maint-token"]'
 
 
@@ -75,7 +75,7 @@ def make_client(monkeypatch, fake_db):
 
 @pytest.fixture
 def client(make_client):
-    """One host token (-> bluefors_1) and one maintenance token configured."""
+    """One host token (-> blackfridge) and one maintenance token configured."""
     return make_client()
 
 

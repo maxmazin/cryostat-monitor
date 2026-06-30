@@ -65,7 +65,7 @@ block top to bottom (it creates the file — it is not just a snippet to read):
 sudo install -d -m 750 -o root -g cryo /etc/cryostat-monitor
 sudo tee /etc/cryostat-monitor/ingest.env >/dev/null <<'EOF'
 CRYO_DB_DSN=postgresql:///cryo?host=/var/run/postgresql
-CRYO_TOKENS={"<bluefors_1-token>":"bluefors_1"}
+CRYO_TOKENS={"<blackfridge-token>":"blackfridge"}
 CRYO_MAINTENANCE_TOKENS=["<maintenance-token>"]
 CRYO_MAX_MAINTENANCE_MINUTES=720
 EOF
@@ -127,27 +127,27 @@ curl.exe -fsS "$URL/health"
 curl.exe -fsS -X POST "$URL/ingest" `
   -H "Authorization: Bearer <that-host-token>" `
   -H "Content-Type: application/json" `
-  -d '{"fridge":"bluefors_1","readings":[{"ts":"2026-06-29T19:00:00Z","channel":"MXC","value":0.0102,"unit":"K"}]}'
+  -d '{"fridge":"blackfridge","readings":[{"ts":"2026-06-29T19:00:00Z","channel":"MXC","value":0.0102,"unit":"K"}]}'
 ```
 
 Then confirm the row landed, back on labmanager:
 
 ```bash
 sudo -u postgres psql -d cryo -c \
-  "SELECT * FROM readings WHERE fridge='bluefors_1';"
+  "SELECT * FROM readings WHERE fridge='blackfridge';"
 sudo -u postgres psql -d cryo -c "SELECT * FROM last_seen;"
 ```
 
 **Phase 0 is complete when that POST — issued from an actual fridge host over
 the tailnet/LAN — lands a row.** Clean up the fake data afterward as the
 postgres superuser — both the reading **and** the `last_seen` row it advanced,
-or the Phase 2 watchdog will later treat `bluefors_1` as a known fridge that has
+or the Phase 2 watchdog will later treat `blackfridge` as a known fridge that has
 gone silent:
 
 ```bash
 sudo -u postgres psql -d cryo \
-  -c "DELETE FROM readings  WHERE fridge='bluefors_1';" \
-  -c "DELETE FROM last_seen WHERE fridge='bluefors_1';"
+  -c "DELETE FROM readings  WHERE fridge='blackfridge';" \
+  -c "DELETE FROM last_seen WHERE fridge='blackfridge';"
 ```
 
 ---

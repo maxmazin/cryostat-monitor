@@ -93,14 +93,14 @@ def test_steady_ok_no_row_is_noop():
 
 # --------------------------------------------------------------------------- formatting
 def test_silent_message_is_distinct_and_has_details():
-    ctx = wd.AlertContext("bluefors_1", "SILENT", "SILENT", age_seconds=300, data_ts=T0)
+    ctx = wd.AlertContext("blackfridge", "SILENT", "SILENT", age_seconds=300, data_ts=T0)
     msg = wd.format_alert(ctx, wd.RAISE)
-    assert "SILENT" in msg and "bluefors_1" in msg and "300s" in msg
+    assert "SILENT" in msg and "blackfridge" in msg and "300s" in msg
     assert "2026-06-30 12:00:00 UTC" in msg
 
 
 def test_threshold_message_has_value_limit_and_ts():
-    ctx = wd.AlertContext("bluefors_1", "MXC", "THRESHOLD", value=0.08,
+    ctx = wd.AlertContext("blackfridge", "MXC", "THRESHOLD", value=0.08,
                           limit=0.05, bound="high", unit="K", data_ts=T0)
     msg = wd.format_alert(ctx, wd.RAISE)
     assert "MXC" in msg and "0.08" in msg and "0.05" in msg and "high" in msg
@@ -168,29 +168,29 @@ def env(monkeypatch):
 
 def _bluefors(staleness_factor=4, poll_interval=60):
     return wd.FridgeConfig(
-        name="bluefors_1", poll_interval=poll_interval, staleness_factor=staleness_factor,
+        name="blackfridge", poll_interval=poll_interval, staleness_factor=staleness_factor,
         channels={"MXC": wd.ChannelLimits(high=0.05)},
     )
 
 
 def test_fresh_data_in_range_no_alert_and_heartbeats(env):
     fake, sent, pings = env
-    fake.seen["bluefors_1"] = T0
-    fake.readings[("bluefors_1", "MXC")] = LatestReading(0.01, T0, "K")
+    fake.seen["blackfridge"] = T0
+    fake.readings[("blackfridge", "MXC")] = LatestReading(0.01, T0, "K")
     wd.check_once(_cfg([_bluefors()]), now=T0 + timedelta(seconds=30))
     assert sent == [] and pings == [True]
 
 
 def test_stale_fridge_raises_silent_and_skips_thresholds(env):
     fake, sent, pings = env
-    fake.seen["bluefors_1"] = T0
+    fake.seen["blackfridge"] = T0
     # Even though MXC is breaching, a stale fridge only pages SILENT.
-    fake.readings[("bluefors_1", "MXC")] = LatestReading(0.09, T0, "K")
+    fake.readings[("blackfridge", "MXC")] = LatestReading(0.09, T0, "K")
     now = T0 + timedelta(seconds=4 * 60 + 1)  # past staleness_factor * poll_interval
     wd.check_once(_cfg([_bluefors()]), now=now)
     assert len(sent) == 1 and "SILENT" in sent[0]
-    assert fake.state[("bluefors_1", "SILENT")].state == "ALERTING"
-    assert ("bluefors_1", "MXC") not in fake.state  # threshold skipped while silent
+    assert fake.state[("blackfridge", "SILENT")].state == "ALERTING"
+    assert ("blackfridge", "MXC") not in fake.state  # threshold skipped while silent
 
 
 def test_never_seen_fridge_is_silent(env):
@@ -201,41 +201,41 @@ def test_never_seen_fridge_is_silent(env):
 
 def test_threshold_breach_raises(env):
     fake, sent, pings = env
-    fake.seen["bluefors_1"] = T0
-    fake.readings[("bluefors_1", "MXC")] = LatestReading(0.09, T0, "K")
+    fake.seen["blackfridge"] = T0
+    fake.readings[("blackfridge", "MXC")] = LatestReading(0.09, T0, "K")
     wd.check_once(_cfg([_bluefors()]), now=T0 + timedelta(seconds=30))
     assert len(sent) == 1 and "THRESHOLD" in sent[0]
-    assert fake.state[("bluefors_1", "MXC")].state == "ALERTING"
+    assert fake.state[("blackfridge", "MXC")].state == "ALERTING"
 
 
 def test_mute_suppresses_both_alert_types(env):
     fake, sent, pings = env
-    fake.muted.add("bluefors_1")
-    fake.readings[("bluefors_1", "MXC")] = LatestReading(0.09, T0, "K")
+    fake.muted.add("blackfridge")
+    fake.readings[("blackfridge", "MXC")] = LatestReading(0.09, T0, "K")
     # never seen -> would be SILENT, but muted
     wd.check_once(_cfg([_bluefors()]), now=T0)
     assert sent == []
-    assert fake.state[("bluefors_1", "SILENT")].state == "ALERTING"  # recorded, not sent
+    assert fake.state[("blackfridge", "SILENT")].state == "ALERTING"  # recorded, not sent
 
 
 def test_restart_mid_alert_does_not_respam(env):
     fake, sent, pings = env
     # Persisted ALERTING from before a restart; still breaching, within reminder.
-    fake.state[("bluefors_1", "MXC")] = AlertRow("ALERTING", since=T0, last_notified=T0)
-    fake.seen["bluefors_1"] = T0
-    fake.readings[("bluefors_1", "MXC")] = LatestReading(0.09, T0, "K")
+    fake.state[("blackfridge", "MXC")] = AlertRow("ALERTING", since=T0, last_notified=T0)
+    fake.seen["blackfridge"] = T0
+    fake.readings[("blackfridge", "MXC")] = LatestReading(0.09, T0, "K")
     wd.check_once(_cfg([_bluefors()]), now=T0 + timedelta(seconds=60))
     assert sent == []  # no re-page
 
 
 def test_recovery_after_breach_clears(env):
     fake, sent, pings = env
-    fake.state[("bluefors_1", "MXC")] = AlertRow("ALERTING", since=T0, last_notified=T0)
-    fake.seen["bluefors_1"] = T0
-    fake.readings[("bluefors_1", "MXC")] = LatestReading(0.01, T0, "K")  # back in range
+    fake.state[("blackfridge", "MXC")] = AlertRow("ALERTING", since=T0, last_notified=T0)
+    fake.seen["blackfridge"] = T0
+    fake.readings[("blackfridge", "MXC")] = LatestReading(0.01, T0, "K")  # back in range
     wd.check_once(_cfg([_bluefors()]), now=T0 + timedelta(seconds=60))
     assert len(sent) == 1 and "RESOLVED" in sent[0]
-    assert fake.state[("bluefors_1", "MXC")].state == "OK"
+    assert fake.state[("blackfridge", "MXC")].state == "OK"
 
 
 def test_total_db_failure_suppresses_heartbeat(env):
@@ -248,9 +248,9 @@ def test_total_db_failure_suppresses_heartbeat(env):
 
 def test_one_flaky_fridge_does_not_stop_heartbeat(env):
     fake, sent, pings = env
-    fake.seen["bluefors_1"] = T0
-    fake.readings[("bluefors_1", "MXC")] = LatestReading(0.01, T0, "K")
-    fake.broken.add("adr_2")  # adr_2's reads raise; bluefors_1 is fine
+    fake.seen["blackfridge"] = T0
+    fake.readings[("blackfridge", "MXC")] = LatestReading(0.01, T0, "K")
+    fake.broken.add("adr_2")  # adr_2's reads raise; blackfridge is fine
     bad = wd.FridgeConfig("adr_2", 30, 4, {"4K": wd.ChannelLimits(high=5.5)})
     wd.check_once(_cfg([_bluefors(), bad]), now=T0 + timedelta(seconds=30))
     assert pings == [True]  # one fridge failed, heartbeat still fired
@@ -260,11 +260,11 @@ def test_one_flaky_fridge_does_not_stop_heartbeat(env):
 def test_failed_slack_send_does_not_persist_state(env, monkeypatch):
     fake, sent, pings = env
     monkeypatch.setattr(wd, "send_slack", lambda msg, cfg: False)  # delivery fails
-    fake.seen["bluefors_1"] = T0
-    fake.readings[("bluefors_1", "MXC")] = LatestReading(0.09, T0, "K")
+    fake.seen["blackfridge"] = T0
+    fake.readings[("blackfridge", "MXC")] = LatestReading(0.09, T0, "K")
     wd.check_once(_cfg([_bluefors()]), now=T0 + timedelta(seconds=30))
     # state NOT written, so the next loop retries the RAISE
-    assert ("bluefors_1", "MXC") not in fake.state
+    assert ("blackfridge", "MXC") not in fake.state
 
 
 # --------------------------------------------------------------------------- config
@@ -272,8 +272,8 @@ def test_load_config_parses_real_yaml():
     cfg = wd.load_config()
     assert cfg.check_interval == 15 and cfg.reminder_interval == 1800
     names = {f.name for f in cfg.fridges}
-    assert {"bluefors_1", "adr_2"} <= names
-    bf = next(f for f in cfg.fridges if f.name == "bluefors_1")
+    assert {"blackfridge", "adr_2"} <= names
+    bf = next(f for f in cfg.fridges if f.name == "blackfridge")
     assert bf.poll_interval == 60 and bf.staleness_factor == 4
     assert bf.channels["MXC"].high == 0.05
     # placeholder healthchecks URL is treated as unset

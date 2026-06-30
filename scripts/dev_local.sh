@@ -29,9 +29,9 @@ INGEST_HOST=127.0.0.1
 INGEST_PORT="${CRYO_DEV_INGEST_PORT:-8000}"
 
 export CRYO_DB_DSN="postgresql://cryo@127.0.0.1:$PORT/cryo"
-export CRYO_TOKENS='{"dev-token-bluefors_1":"bluefors_1"}'
+export CRYO_TOKENS='{"dev-token-blackfridge":"blackfridge"}'
 export CRYO_MAINTENANCE_TOKENS='["dev-maintenance-token"]'
-export TOKEN="dev-token-bluefors_1"
+export TOKEN="dev-token-blackfridge"
 # Exported so verify_phase0.sh works whether invoked via `verify` or directly.
 export INGEST_URL="http://$INGEST_HOST:$INGEST_PORT"
 

@@ -12,7 +12,8 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from daemon import LogTailer, load_parser, run_cycle, to_utc
-from parsers.bluefors_1 import Bluefors1Parser
+from parsers.blackfridge import BlackfridgeParser
+from parsers.whitefridge import WhitefridgeParser
 from spool import Spool
 
 UTC = ZoneInfo("UTC")
@@ -133,7 +134,13 @@ def test_to_utc_localizes_naive_timestamp():
 
 
 def test_load_parser_returns_instance():
-    assert isinstance(load_parser("bluefors_1"), Bluefors1Parser)
+    assert isinstance(load_parser("blackfridge"), BlackfridgeParser)
+
+
+def test_load_parser_picks_module_class_not_imported_base():
+    # whitefridge.py imports BlueforsParser; the loader must return the
+    # fridge-specific subclass, not the imported base.
+    assert isinstance(load_parser("whitefridge"), WhitefridgeParser)
 
 
 # --------------------------------------------------------------------------- full cycle / backfill
@@ -152,7 +159,7 @@ def test_cycle_backfills_after_network_outage(tmp_path):
     # Acceptance (b): POST fails for a while; rows accumulate un-acked and flush
     # on recovery with zero duplicates.
     f, tailer, spool = _setup(tmp_path)
-    parser = Bluefors1Parser()
+    parser = BlackfridgeParser()
     sent: list[dict] = []
 
     fail = lambda rows: False
@@ -176,7 +183,7 @@ def test_cycle_zero_duplicates_across_restart(tmp_path):
     # Acceptance (a): persisted spool + offsets mean a restart backfills the gap
     # exactly once.
     f, tailer, spool = _setup(tmp_path)
-    parser = Bluefors1Parser()
+    parser = BlackfridgeParser()
     sent: list[dict] = []
     ok = lambda rows: (sent.extend(rows), True)[1]
 

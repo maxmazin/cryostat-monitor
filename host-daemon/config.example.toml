@@ -1,13 +1,13 @@
 # Per-host daemon config (§6). Copy to config.toml on each fridge host and
 # fill in. config.toml is gitignored — it holds the per-host bearer token.
 
-fridge        = "bluefors_1"
-parser        = "bluefors_1"                       # module in parsers/
+fridge        = "blackfridge"
+parser        = "blackfridge"                       # module in parsers/
 # BlueFors writes a dated folder per day; the daemon tails the per-channel
 # temperature files AND maxigauge (pressures). One glob per file type (Python
 # glob has no brace expansion); the `*/` matches the dated day folders. The
 # tailer reads each matching file from where it left off. See
-# samples/fridge1/notes.md.
+# samples/blackfridge/notes.md.
 log_globs = [
     "C:/BlueFors/logs/*/CH* T *.log",
     "C:/BlueFors/logs/*/maxigauge *.log",

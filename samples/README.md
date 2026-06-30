@@ -11,11 +11,11 @@ One subfolder per fridge, named exactly as the fridge will be in config
 
 ```
 samples/
-  bluefors_1/
+  blackfridge/
     <copy of a real log file or two, verbatim>
     <ideally one from just after a midnight rotation, if files rotate>
     notes.md          # the metadata below for this fridge
-  adr_2/
+  whitefridge/
     ...
 ```
 

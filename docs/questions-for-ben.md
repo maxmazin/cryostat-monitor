@@ -19,7 +19,7 @@ For **each** fridge:
 
 | Field | Answer |
 |---|---|
-| Fridge name (e.g. `bluefors_1`) | |
+| Fridge name (e.g. `blackfridge`) | |
 | Logger software / model | |
 | Example log file path | |
 | Filename pattern (glob) | |

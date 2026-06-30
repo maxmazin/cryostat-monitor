@@ -20,9 +20,24 @@ slack:
   webhook_url_env: "CRYO_ALERT_SLACK_WEBHOOK"
 
 fridges:
-  bluefors_1:
-    poll_interval: 60         # BlueFors logs ~1/min (samples/fridge1/notes.md)
+  blackfridge:
+    poll_interval: 60         # BlueFors logs ~1/min (samples/blackfridge/notes.md)
     staleness_factor: 4       # SILENT after ~240 s of no data
+    timezone: "America/Los_Angeles"
+    channels:
+      "50K":   { high: 70.0 }
+      "4K":    { high: 5.5 }
+      "still": { high: 1.5 }
+      "MXC":   { high: 0.050 }
+      "P_still": { high: 1.0, unit: "mbar" }
+
+  # Same BlueFors logger family as blackfridge, different software build: ~10 s
+  # log cadence (samples/whitefridge/notes.md). poll_interval here is the daemon's
+  # effective reporting cadence, not the log cadence — keep it >= the daemon's
+  # batch interval so staleness math doesn't false-alarm.
+  whitefridge:
+    poll_interval: 30
+    staleness_factor: 4       # SILENT after ~120 s of no data
     timezone: "America/Los_Angeles"
     channels:
       "50K":   { high: 70.0 }
