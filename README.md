@@ -126,9 +126,13 @@ reading lands a row — and additionally checks idempotency on re-POST:
 - **Phase 0 — Environment: done.** Schema, roles, FastAPI ingest persisting to
   Postgres, idempotent writes, token auth, capped `/maintenance`. Verified
   end-to-end locally (`verify_phase0.sh`).
-- **Phase 1 — One fridge end-to-end:** next. Implement the ugliest fridge's
-  parser plus the host daemon's spool and log-rotation handling. Needs the
-  per-fridge log samples (§11 Q5).
+- **Phase 1 — One fridge end-to-end: in progress.** BlueFors (fridge1) parser,
+  host daemon (multi-file tailer with offset/inode tracking + midnight rotation,
+  idempotent SQLite spool, POST/ack/backfill loop) — all built and tested,
+  including zero-duplicate backfill after daemon/network outage. Verified
+  end-to-end on real sample logs (daemon → ingest → Postgres). Remaining:
+  confirm the §11 channel-map/timezone with Ben, deploy the daemon as an NSSM
+  service on the host, and add one Grafana panel.
 
 Before Phase 1:
 - [`docs/questions-for-ben.md`](./docs/questions-for-ben.md) — open questions

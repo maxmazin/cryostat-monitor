@@ -4,11 +4,18 @@
 fridge        = "bluefors_1"
 parser        = "bluefors_1"                       # module in parsers/
 # BlueFors writes a dated folder per day; the daemon tails the per-channel
-# temperature files AND maxigauge (pressures). The tailer resolves the current
-# day's folder — point this at the log base. See samples/fridge1/notes.md.
-log_glob      = "C:/BlueFors/logs/*/{CH* T *,maxigauge *}.log"  # confirm per fridge
-poll_interval = 60                                  # seconds (BlueFors logs ~1/min)
-server_url    = "https://labmanager.<tailnet>.ts.net/ingest"
-token         = "<per-host bearer token>"           # unique per host
-timezone      = "America/Los_Angeles"               # confirm per fridge
-spool_path    = "spool.sqlite"
+# temperature files AND maxigauge (pressures). One glob per file type (Python
+# glob has no brace expansion); the `*/` matches the dated day folders. The
+# tailer reads each matching file from where it left off. See
+# samples/fridge1/notes.md.
+log_globs = [
+    "C:/BlueFors/logs/*/CH* T *.log",
+    "C:/BlueFors/logs/*/maxigauge *.log",
+]
+poll_interval     = 60                              # seconds (BlueFors logs ~1/min)
+server_url        = "https://labmanager.<tailnet>.ts.net/ingest"
+token             = "<per-host bearer token>"       # unique per host
+timezone          = "America/Los_Angeles"           # confirm per fridge
+spool_path        = "spool.sqlite"
+offset_state_path = "offsets.json"                  # tailer's per-file offsets
+spool_retain_days = 7                               # prune acked rows older than this
