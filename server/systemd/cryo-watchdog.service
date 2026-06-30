@@ -8,7 +8,7 @@ Type=simple
 User=cryo
 WorkingDirectory=/opt/cryostat-monitor/server
 EnvironmentFile=/etc/cryostat-monitor/watchdog.env
-ExecStart=/opt/cryostat-monitor/server/.venv/bin/python watchdog/watchdog.py
+ExecStart=/opt/cryostat-monitor/server/.venv/bin/python -m watchdog.watchdog
 # Keep it alive aggressively — a dead watchdog is a silent monitor.
 Restart=always
 RestartSec=5
