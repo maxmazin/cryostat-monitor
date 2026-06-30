@@ -6,6 +6,7 @@
 #
 #   ./scripts/dev_local.sh up      # init cluster, apply schema, (re)start ingest
 #   ./scripts/dev_local.sh verify  # run the Phase 0 acceptance check
+#   ./scripts/dev_local.sh test    # run the pytest suite (DB only; no ingest svc)
 #   ./scripts/dev_local.sh down    # stop everything
 #
 # `up` is idempotent: re-running it reuses a running cluster and restarts the
@@ -20,6 +21,8 @@ WORKDIR="${CRYO_DEV_WORKDIR:-/tmp/cryo-dev}"
 PGDATA="$WORKDIR/pgdata"
 SOCK="/tmp/cryopg"          # short path: PG unix sockets cap at 103 bytes
 VENV="$WORKDIR/venv"
+STAMP="$VENV/.deps-installed"        # marks a successful base-deps install
+DEVSTAMP="$VENV/.dev-deps-installed" # marks a successful dev-deps install
 PIDFILE="$WORKDIR/uvicorn.pid"
 PORT="${CRYO_DEV_PGPORT:-54329}"
 INGEST_HOST=127.0.0.1
@@ -47,7 +50,9 @@ free_ingest_port() {
     fi
 }
 
-up() {
+# Bring up only the database (cluster + schema + grants) — no ingest service.
+# Both `up` and `run_tests` build on this; tests need the DB but not uvicorn.
+up_db() {
     mkdir -p "$SOCK" "$WORKDIR"
     if [ ! -d "$PGDATA" ]; then
         initdb -D "$PGDATA" -U "${USER:-postgres}" --auth=trust >/dev/null
@@ -61,21 +66,39 @@ up() {
 
     createdb -h 127.0.0.1 -p "$PORT" cryo 2>/dev/null || true
     psql -h 127.0.0.1 -p "$PORT" -d cryo -c \
-        "DO \$\$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='cryo') THEN CREATE ROLE cryo LOGIN; END IF; END \$\$;"
+        "DO \$\$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='cryo') THEN CREATE ROLE cryo LOGIN; END IF; END \$\$;" >/dev/null
     psql -h 127.0.0.1 -p "$PORT" -d cryo -f "$REPO/server/db/schema.sql" >/dev/null
     # Production grants the app role only SELECT/INSERT/UPDATE (see README); the
     # dev/test cluster also grants DELETE so integration tests can clean up rows.
     psql -h 127.0.0.1 -p "$PORT" -d cryo -c \
         "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO cryo;" >/dev/null
+}
 
-    # Reinstall if the venv is missing OR incomplete (a half-built venv from an
-    # interrupted run has the dir but no uvicorn binary).
-    if [ ! -x "$VENV/bin/uvicorn" ]; then
+# Create the venv if missing/incomplete and (re)install base deps when
+# requirements.txt has changed since the last successful install. The stamp is
+# written only after a successful install, so an interrupted build self-heals.
+ensure_venv() {
+    if [ ! -x "$VENV/bin/python" ]; then
         python3 -m venv "$VENV"
         "$VENV/bin/pip" install -q --upgrade pip
-        "$VENV/bin/pip" install -q -r "$REPO/server/requirements.txt"
     fi
+    if [ ! -f "$STAMP" ] || [ "$REPO/server/requirements.txt" -nt "$STAMP" ]; then
+        "$VENV/bin/pip" install -q -r "$REPO/server/requirements.txt"
+        touch "$STAMP"
+    fi
+}
 
+# (Re)install dev deps only when requirements-dev.txt changed since last install.
+ensure_dev_deps() {
+    if [ ! -f "$DEVSTAMP" ] || [ "$REPO/server/requirements-dev.txt" -nt "$DEVSTAMP" ]; then
+        "$VENV/bin/pip" install -q -r "$REPO/server/requirements-dev.txt"
+        touch "$DEVSTAMP"
+    fi
+}
+
+up() {
+    up_db
+    ensure_venv
     free_ingest_port
     # Start without a subshell so we can capture the PID and watch it. --app-dir
     # lets uvicorn import ingest.app without a cd.
@@ -114,11 +137,15 @@ down() {
 
 verify() { "$REPO/scripts/verify_phase0.sh"; }
 
-# Run the pytest suite (unit + integration) against the dev cluster.
+# Run the pytest suite (unit + integration) against the dev cluster. Only the
+# DB is needed — no uvicorn — so this uses up_db, not up, and leaves no service
+# running. Extra args are forwarded to pytest (e.g. `test -k maintenance`,
+# `test tests/test_app.py`), resolved relative to server/.
 run_tests() {
-    up >/dev/null
-    "$VENV/bin/pip" install -q -r "$REPO/server/requirements-dev.txt"
-    CRYO_TEST_DSN="$CRYO_DB_DSN" "$VENV/bin/pytest" "$REPO/server" "$@"
+    up_db
+    ensure_venv
+    ensure_dev_deps
+    ( cd "$REPO/server" && CRYO_TEST_DSN="$CRYO_DB_DSN" exec "$VENV/bin/pytest" "$@" )
 }
 
 case "${1:-}" in

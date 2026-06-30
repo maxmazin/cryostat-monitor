@@ -20,6 +20,15 @@ from ingest import db
 
 DSN = os.environ.get("CRYO_TEST_DSN")
 
+# Locally a missing DSN skips these (no DB needed for unit work). In CI we set
+# CRYO_REQUIRE_INTEGRATION so a missing/typo'd DSN is a hard error instead of a
+# silent skip-to-green that would leave the DB layer untested.
+if not DSN and os.environ.get("CRYO_REQUIRE_INTEGRATION"):
+    raise RuntimeError(
+        "CRYO_REQUIRE_INTEGRATION is set but CRYO_TEST_DSN is unset — integration "
+        "tests would skip. Set CRYO_TEST_DSN to a schema-applied test database."
+    )
+
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(not DSN, reason="set CRYO_TEST_DSN to run DB integration tests"),
@@ -36,12 +45,15 @@ def _pool():
 
 @pytest.fixture
 def fridge(_pool):
-    """A unique fridge name; rows are deleted after the test."""
+    """A unique fridge name; all its rows are deleted after the test."""
     name = f"test_{uuid.uuid4().hex[:8]}"
     yield name
+    # All three deletes share one transaction (the `with` block): they commit
+    # together or roll back together, so a failure can't leave rows in only some
+    # tables. Covers every table the integration tests write to.
     with db._get_pool().connection() as conn:
-        conn.execute("DELETE FROM readings WHERE fridge = %s", (name,))
-        conn.execute("DELETE FROM last_seen WHERE fridge = %s", (name,))
+        for table in ("readings", "last_seen", "maintenance"):
+            conn.execute(f"DELETE FROM {table} WHERE fridge = %s", (name,))
 
 
 def _latest_seen(fridge: str) -> datetime:
@@ -71,3 +83,18 @@ def test_last_seen_never_goes_backward(fridge):
     # A late backfill batch with older timestamps must not lower last_seen.
     db.insert_readings(fridge, [(t_old, fridge, "MXC", 0.02, "K")])
     assert _latest_seen(fridge) == t_new
+
+
+def test_insert_maintenance_creates_window(fridge):
+    # Exercises the make_interval(mins => %s) SQL path end-to-end.
+    db.insert_maintenance(fridge, 60, "regen", "ben")
+    with db._get_pool().connection() as conn:
+        row = conn.execute(
+            "SELECT reason, set_by, EXTRACT(EPOCH FROM (until_ts - now())) / 60 "
+            "FROM maintenance WHERE fridge = %s",
+            (fridge,),
+        ).fetchone()
+    reason, set_by, minutes_out = row
+    assert reason == "regen"
+    assert set_by == "ben"
+    assert 59 <= minutes_out <= 61   # until_ts is ~60 minutes from now

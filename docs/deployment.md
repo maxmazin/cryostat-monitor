@@ -46,31 +46,36 @@ and its `.venv`.)
 
 ## 3. Configuration & tokens
 
-Generate strong tokens — one **per fridge host** plus one **maintenance** token:
+Create the service user first (the systemd unit runs as `cryo`), then generate
+strong tokens — one **per fridge host** plus one **maintenance** token:
 
 ```bash
+sudo useradd --system --no-create-home cryo 2>/dev/null || true
 python3 -c "import secrets; print(secrets.token_urlsafe(32))"   # run once per token
 ```
 
-Create `/etc/cryostat-monitor/ingest.env` (mode 600, owned by the `cryo` user)
-from `server/.env.example`:
+Now create the config directory and the `ingest.env` file. The file holds
+secrets, so it is owned `root:cryo`, mode `640` (the `cryo` group reads it, not
+world); the directory is `root:cryo`, mode `750` so only `cryo` can traverse it.
+systemd reads `EnvironmentFile=` **as root** before dropping to `User=cryo`, so
+these permissions keep the secrets private without blocking startup. Run this
+block top to bottom (it creates the file — it is not just a snippet to read):
 
-```ini
+```bash
+sudo install -d -m 750 -o root -g cryo /etc/cryostat-monitor
+sudo tee /etc/cryostat-monitor/ingest.env >/dev/null <<'EOF'
 CRYO_DB_DSN=postgresql:///cryo?host=/var/run/postgresql
 CRYO_TOKENS={"<bluefors_1-token>":"bluefors_1"}
 CRYO_MAINTENANCE_TOKENS=["<maintenance-token>"]
 CRYO_MAX_MAINTENANCE_MINUTES=720
-```
-
-```bash
-sudo install -d -m 750 /etc/cryostat-monitor
-sudo useradd --system --no-create-home cryo 2>/dev/null || true
+EOF
 sudo chown root:cryo /etc/cryostat-monitor/ingest.env
 sudo chmod 640 /etc/cryostat-monitor/ingest.env
 ```
 
-Add each fridge as you onboard it by extending the `CRYO_TOKENS` JSON object.
-Keep these tokens out of git (the repo's `.gitignore` already excludes `*.env`).
+Then replace the `<...>` placeholders with the tokens you generated. Add each
+fridge as you onboard it by extending the `CRYO_TOKENS` JSON object. Keep these
+tokens out of git (the repo's `.gitignore` already excludes `*.env`).
 
 ## 4. Run the ingest service (systemd)
 
@@ -93,10 +98,12 @@ service needs an HTTPS front end. Pick per Q1:
 ### Tailnet (recommended default) — Tailscale Serve
 
 Tailscale provisions a valid HTTPS cert for the MagicDNS name and proxies to the
-local port — no nginx, no manual certs:
+local port — no nginx, no manual certs. Serve's flag syntax has shifted across
+releases, so verify against your installed version (`tailscale version`); on
+current releases:
 
 ```bash
-sudo tailscale serve --bg --https 443 http://127.0.0.1:8000
+sudo tailscale serve --bg --https=443 http://127.0.0.1:8000
 tailscale serve status      # should show https://labmanager.<tailnet>.ts.net -> 127.0.0.1:8000
 ```
 
@@ -132,8 +139,16 @@ sudo -u postgres psql -d cryo -c "SELECT * FROM last_seen;"
 ```
 
 **Phase 0 is complete when that POST — issued from an actual fridge host over
-the tailnet/LAN — lands a row.** Clean up the fake row afterward
-(`DELETE FROM readings WHERE fridge='bluefors_1';` as the postgres superuser).
+the tailnet/LAN — lands a row.** Clean up the fake data afterward as the
+postgres superuser — both the reading **and** the `last_seen` row it advanced,
+or the Phase 2 watchdog will later treat `bluefors_1` as a known fridge that has
+gone silent:
+
+```bash
+sudo -u postgres psql -d cryo \
+  -c "DELETE FROM readings  WHERE fridge='bluefors_1';" \
+  -c "DELETE FROM last_seen WHERE fridge='bluefors_1';"
+```
 
 ---
 

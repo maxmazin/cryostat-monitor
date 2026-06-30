@@ -6,12 +6,18 @@ on:
   pull_request:
     branches: [main]
 
+# Least privilege: this workflow only needs to read the repo. It runs PR code,
+# so don't hand it a write-scoped token.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
 
     # Throwaway PostgreSQL for the integration tests. The cryo role is the
-    # container superuser, so it owns the tables and needs no extra grants.
+    # container superuser; the production-grant model is checked separately
+    # below ("Verify production app-role grants").
     services:
       postgres:
         image: postgres:16
@@ -21,14 +27,20 @@ jobs:
           POSTGRES_HOST_AUTH_METHOD: trust
         ports:
           - 5432:5432
+        # start-period covers the image's first-boot init (temp server, then
+        # restart) so the health check doesn't pass against the bootstrap server
+        # and race the schema step.
         options: >-
-          --health-cmd "pg_isready -U cryo"
-          --health-interval 10s
+          --health-cmd "pg_isready -U cryo -d cryo"
+          --health-interval 5s
           --health-timeout 5s
-          --health-retries 5
+          --health-retries 10
+          --health-start-period 15s
 
     env:
       CRYO_TEST_DSN: postgresql://cryo@localhost:5432/cryo
+      # Make a missing/typo'd DSN a hard error in CI instead of a silent skip.
+      CRYO_REQUIRE_INTEGRATION: "1"
 
     steps:
       - uses: actions/checkout@v4
@@ -40,14 +52,40 @@ jobs:
           cache-dependency-path: |
             server/requirements.txt
             server/requirements-dev.txt
+            server/constraints.txt
 
       - name: Install dependencies
+        # constraints.txt pins exact versions for reproducible CI; the
+        # requirements files keep their floor pins for humans.
         run: |
           python -m pip install --upgrade pip
-          pip install -r server/requirements.txt -r server/requirements-dev.txt
+          pip install -c server/constraints.txt \
+            -r server/requirements.txt -r server/requirements-dev.txt
 
       - name: Apply database schema
-        run: psql "$CRYO_TEST_DSN" -f server/db/schema.sql
+        run: psql "$CRYO_TEST_DSN" -v ON_ERROR_STOP=1 -f server/db/schema.sql
+
+      - name: Verify production app-role grants
+        # The integration tests run as the superuser; this step confirms the
+        # restricted production role (SELECT/INSERT/UPDATE, no DELETE — see
+        # README/deployment.md) can do everything the app needs and nothing more.
+        run: |
+          set -euo pipefail
+          psql "$CRYO_TEST_DSN" -v ON_ERROR_STOP=1 -c "CREATE ROLE cryo_app LOGIN;"
+          psql "$CRYO_TEST_DSN" -v ON_ERROR_STOP=1 \
+            -c "GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA public TO cryo_app;"
+          APP_DSN="postgresql://cryo_app@localhost:5432/cryo"
+          psql "$APP_DSN" -v ON_ERROR_STOP=1 \
+            -c "INSERT INTO readings (ts,fridge,channel,value,unit) VALUES (now(),'grant_probe','MXC',0.01,'K');" \
+            -c "INSERT INTO last_seen (fridge,last_ts) VALUES ('grant_probe',now()) ON CONFLICT (fridge) DO UPDATE SET last_ts = EXCLUDED.last_ts;" \
+            -c "INSERT INTO maintenance (fridge,until_ts) VALUES ('grant_probe',now());"
+          if psql "$APP_DSN" -c "DELETE FROM readings WHERE fridge='grant_probe';" 2>/dev/null; then
+            echo "ERROR: app role can DELETE, but the production grant must forbid it"; exit 1
+          fi
+          psql "$CRYO_TEST_DSN" -v ON_ERROR_STOP=1 \
+            -c "DELETE FROM readings WHERE fridge='grant_probe';" \
+            -c "DELETE FROM last_seen WHERE fridge='grant_probe';" \
+            -c "DELETE FROM maintenance WHERE fridge='grant_probe';"
 
       - name: Compile-check daemon and watchdog stubs
         run: |
@@ -57,4 +95,7 @@ jobs:
 
       - name: Run tests (unit + integration)
         working-directory: server
-        run: pytest -v
+        # --strict-markers turns a typo'd @pytest.mark into an error. Integration
+        # tests can't silently skip here: CRYO_REQUIRE_INTEGRATION makes a missing
+        # DSN a collection error.
+        run: pytest -v --strict-markers

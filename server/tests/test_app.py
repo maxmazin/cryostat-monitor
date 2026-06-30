@@ -140,14 +140,35 @@ def test_maintenance_unknown_fridge_returns_404(client, fake_db):
     assert fake_db.maintenance_calls == []  # no row written for a bad name
 
 
-def test_maintenance_caps_duration_at_max(client, fake_db):
-    # Default cap is 720 minutes (CRYO_MAX_MAINTENANCE_MINUTES unset).
+def test_maintenance_caps_duration_at_default_max(make_client, fake_db):
+    # Default cap is 720 minutes when CRYO_MAX_MAINTENANCE_MINUTES is unset.
+    client = make_client(max_minutes=None)
     r = client.post("/maintenance", headers=MAINT_AUTH,
                     json={"fridge": "bluefors_1", "minutes": 9999})
     body = r.json()
     assert body["minutes_granted"] == 720
     assert body["capped"] is True
     assert fake_db.maintenance_calls[0][1] == 720  # capped value reaches the DB
+
+
+def test_maintenance_cap_is_configurable(make_client, fake_db):
+    # A non-default cap from the environment is honored (read at startup).
+    client = make_client(max_minutes="30")
+    r = client.post("/maintenance", headers=MAINT_AUTH,
+                    json={"fridge": "bluefors_1", "minutes": 9999})
+    body = r.json()
+    assert body["minutes_granted"] == 30
+    assert body["capped"] is True
+    assert fake_db.maintenance_calls[0][1] == 30
+
+
+def test_maintenance_under_cap_not_capped(make_client, fake_db):
+    client = make_client(max_minutes="720")
+    r = client.post("/maintenance", headers=MAINT_AUTH,
+                    json={"fridge": "bluefors_1", "minutes": 60})
+    body = r.json()
+    assert body["minutes_granted"] == 60
+    assert body["capped"] is False
 
 
 def test_maintenance_rejects_nonpositive_minutes_422(client):

@@ -55,23 +55,29 @@ def _load_maintenance_tokens() -> set[str]:
     return set(_load_json_env("CRYO_MAINTENANCE_TOKENS", "CRYO_MAINTENANCE_TOKENS_FILE") or [])
 
 
-# Populated at startup (lifespan).
+# All configuration is loaded at startup (lifespan), so a fresh process — or a
+# fresh TestClient in tests — picks up the current environment. Defaults here
+# apply only until lifespan runs.
 TOKENS: dict[str, str] = {}
 MAINTENANCE_TOKENS: set[str] = set()
 KNOWN_FRIDGES: set[str] = set()
+# Cap on accepted maintenance duration (§7): OpenClaw can request a mute but
+# cannot disable the watchdog indefinitely.
+MAX_MAINTENANCE_MINUTES = 720
 
-# Cap accepted maintenance duration (§7). OpenClaw can request a mute but cannot
-# disable the watchdog indefinitely.
-MAX_MAINTENANCE_MINUTES = int(os.environ.get("CRYO_MAX_MAINTENANCE_MINUTES", "720"))
+
+def _load_max_maintenance_minutes() -> int:
+    return int(os.environ.get("CRYO_MAX_MAINTENANCE_MINUTES", "720"))
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global TOKENS, MAINTENANCE_TOKENS, KNOWN_FRIDGES
+    global TOKENS, MAINTENANCE_TOKENS, KNOWN_FRIDGES, MAX_MAINTENANCE_MINUTES
     TOKENS = _load_tokens()
     MAINTENANCE_TOKENS = _load_maintenance_tokens()
     # The configured fridges are exactly the targets of the per-host tokens.
     KNOWN_FRIDGES = set(TOKENS.values())
+    MAX_MAINTENANCE_MINUTES = _load_max_maintenance_minutes()
     if not TOKENS:
         log.warning("CRYO_TOKENS is empty: every /ingest request will be rejected (401).")
     if not MAINTENANCE_TOKENS:

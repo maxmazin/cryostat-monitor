@@ -6,11 +6,16 @@ without a live PostgreSQL.
 """
 from __future__ import annotations
 
+import contextlib
+
 import pytest
 from fastapi.testclient import TestClient
 
 from ingest import app as app_module
 from ingest import db
+
+DEFAULT_TOKENS = '{"host-token": "bluefors_1"}'
+DEFAULT_MAINTENANCE_TOKENS = '["maint-token"]'
 
 
 class FakeDB:
@@ -38,29 +43,43 @@ def fake_db(monkeypatch):
     return fake
 
 
-def _client(monkeypatch, *, tokens: str | None, maint_tokens: str | None) -> TestClient:
-    monkeypatch.setenv("CRYO_DB_DSN", "postgresql://unused-in-unit-tests")
-    for var, val in (("CRYO_TOKENS", tokens), ("CRYO_MAINTENANCE_TOKENS", maint_tokens)):
-        if val is None:
-            monkeypatch.delenv(var, raising=False)
-        else:
-            monkeypatch.setenv(var, val)
-    monkeypatch.delenv("CRYO_TOKENS_FILE", raising=False)
-    monkeypatch.delenv("CRYO_MAINTENANCE_TOKENS_FILE", raising=False)
-    return TestClient(app_module.app)
+def _set_or_del(monkeypatch, var: str, val: str | None) -> None:
+    if val is None:
+        monkeypatch.delenv(var, raising=False)
+    else:
+        monkeypatch.setenv(var, val)
 
 
 @pytest.fixture
-def client(monkeypatch, fake_db):
+def make_client(monkeypatch, fake_db):
+    """Factory that builds a TestClient with controllable config.
+
+    Config is read in the app's lifespan, which fires when the TestClient
+    context is entered — so env set here takes effect per client. Clients are
+    exited automatically at the end of the test.
+    """
+    with contextlib.ExitStack() as stack:
+        def _make(*, tokens: str | None = DEFAULT_TOKENS,
+                  maint_tokens: str | None = DEFAULT_MAINTENANCE_TOKENS,
+                  max_minutes: str | None = None) -> TestClient:
+            monkeypatch.setenv("CRYO_DB_DSN", "postgresql://unused-in-unit-tests")
+            _set_or_del(monkeypatch, "CRYO_TOKENS", tokens)
+            _set_or_del(monkeypatch, "CRYO_MAINTENANCE_TOKENS", maint_tokens)
+            _set_or_del(monkeypatch, "CRYO_MAX_MAINTENANCE_MINUTES", max_minutes)
+            monkeypatch.delenv("CRYO_TOKENS_FILE", raising=False)
+            monkeypatch.delenv("CRYO_MAINTENANCE_TOKENS_FILE", raising=False)
+            return stack.enter_context(TestClient(app_module.app))
+
+        yield _make
+
+
+@pytest.fixture
+def client(make_client):
     """One host token (-> bluefors_1) and one maintenance token configured."""
-    with _client(monkeypatch, tokens='{"host-token": "bluefors_1"}',
-                 maint_tokens='["maint-token"]') as c:
-        yield c
+    return make_client()
 
 
 @pytest.fixture
-def client_no_maint(monkeypatch, fake_db):
+def client_no_maint(make_client):
     """Host token configured but NO maintenance tokens (fail-closed case)."""
-    with _client(monkeypatch, tokens='{"host-token": "bluefors_1"}',
-                 maint_tokens=None) as c:
-        yield c
+    return make_client(maint_tokens=None)
