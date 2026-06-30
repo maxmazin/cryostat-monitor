@@ -93,9 +93,13 @@ jobs:
             host-daemon/daemon.py host-daemon/spool.py host-daemon/parsers/*.py \
             server/watchdog/watchdog.py
 
-      - name: Run tests (unit + integration)
+      - name: Run server tests (unit + integration)
         working-directory: server
         # --strict-markers turns a typo'd @pytest.mark into an error. Integration
         # tests can't silently skip here: CRYO_REQUIRE_INTEGRATION makes a missing
         # DSN a collection error.
+        run: pytest -v --strict-markers
+
+      - name: Run host-daemon tests (parsers)
+        working-directory: host-daemon
         run: pytest -v --strict-markers

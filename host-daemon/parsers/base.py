@@ -12,15 +12,21 @@ from datetime import datetime
 
 @dataclass
 class Reading:
-    ts: datetime      # tz-aware; converted to UTC by the daemon
+    ts: datetime      # naive LOCAL time as written by the logger; the daemon
+                      # attaches the configured tz and converts to UTC (§6.2).
     channel: str      # canonical name, e.g. "MXC", "4K", "still", "P_still"
     value: float
     unit: str         # "K" or "mbar"
 
 
 class Parser:
-    def parse_new(self, raw_lines: list[str]) -> list[Reading]:
+    def parse_new(self, source: str, raw_lines: list[str]) -> list[Reading]:
         """Convert newly-read log lines into Readings.
+
+        `source` is the basename of the file the lines came from (e.g.
+        "CH6 T 26-06-30.log", "maxigauge 26-06-30.log"). Loggers like BlueFors
+        split readings across many files, so the parser needs it to know how to
+        interpret each line.
 
         MUST skip/log malformed lines, never raise on bad input — losing one
         fridge over a stray byte is unacceptable (§12).

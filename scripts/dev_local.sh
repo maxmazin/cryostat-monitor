@@ -137,15 +137,26 @@ down() {
 
 verify() { "$REPO/scripts/verify_phase0.sh"; }
 
-# Run the pytest suite (unit + integration) against the dev cluster. Only the
-# DB is needed — no uvicorn — so this uses up_db, not up, and leaves no service
-# running. Extra args are forwarded to pytest (e.g. `test -k maintenance`,
-# `test tests/test_app.py`), resolved relative to server/.
+# Run pytest for one suite directory, forwarding extra args. Exit code 5 ("no
+# tests collected") is tolerated so a `-k`/path filter that scopes to the other
+# suite doesn't fail the run.
+_run_pytest() {
+    local dir="$1"; shift
+    local rc=0
+    ( cd "$REPO/$dir" && CRYO_TEST_DSN="$CRYO_DB_DSN" "$VENV/bin/pytest" "$@" ) || rc=$?
+    [ "$rc" -eq 0 ] || [ "$rc" -eq 5 ] || return "$rc"
+}
+
+# Run the full pytest suite (server unit+integration, plus host-daemon parsers)
+# against the dev cluster. Only the DB is needed — no uvicorn — so this uses
+# up_db, not up, and leaves no service running. Extra args forward to pytest
+# (e.g. `test -k maintenance`, `test tests/test_app.py`), resolved per suite dir.
 run_tests() {
     up_db
     ensure_venv
     ensure_dev_deps
-    ( cd "$REPO/server" && CRYO_TEST_DSN="$CRYO_DB_DSN" exec "$VENV/bin/pytest" "$@" )
+    _run_pytest server "$@"
+    _run_pytest host-daemon "$@"
 }
 
 case "${1:-}" in

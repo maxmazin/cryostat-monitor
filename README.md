@@ -99,7 +99,15 @@ connecting role needs DELETE for row cleanup):
 CRYO_TEST_DSN=postgresql://cryo@127.0.0.1:54329/cryo pytest
 ```
 
-`./scripts/dev_local.sh test` wires all of this up against the throwaway dev DB.
+Host-daemon parser tests (stdlib only, no DB) live in `host-daemon/tests` and
+run against the real sample logs in `samples/`:
+
+```bash
+cd host-daemon && pytest
+```
+
+`./scripts/dev_local.sh test` runs all of this — server (unit + integration)
+and host-daemon parsers — against the throwaway dev DB.
 
 ### Acceptance check
 

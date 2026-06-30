@@ -49,10 +49,13 @@ class LogTailer:
         self.offset = 0
         self.file_id = None
 
-    def read_new_lines(self) -> list[str]:
-        # TODO: resolve active file from glob; detect file-id change (midnight
-        # rotation) and reset offset; read from offset to EOF; hold back a
-        # partial final line until the newline arrives. Never raise.
+    def read_new_lines(self) -> list[tuple[str, list[str]]]:
+        # Returns (source_basename, new_lines) per active file, because a fridge
+        # logs to many files (BlueFors: CH* T, maxigauge, …) and the parser needs
+        # the source to interpret each line.
+        # TODO: resolve active files from glob; track byte offset AND inode/
+        # file-id per file; on file-id change (midnight rotation) reset offset
+        # and pick up the new file; hold back a partial final line. Never raise.
         return []
 
 
@@ -85,8 +88,9 @@ def main() -> None:
 
     while True:
         try:
-            raw = tailer.read_new_lines()                 # 1
-            readings = parser.parse_new(raw)              # 2
+            readings = []
+            for source, lines in tailer.read_new_lines():   # 1 (per file)
+                readings.extend(parser.parse_new(source, lines))   # 2
             for r in readings:
                 r.ts = to_utc(r.ts, tz)
             spool.append(readings)                        # 3

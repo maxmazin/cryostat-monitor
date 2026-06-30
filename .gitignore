@@ -23,6 +23,8 @@ config.toml
 
 # Logs
 *.log
+# ...but DO track committed sample logs (parser fixtures / Q5 reference data).
+!samples/**/*.log
 
 # Editor
 .idea/

@@ -15,7 +15,7 @@ CHANNEL_MAP: dict[str, str] = {
 
 
 class Adr2Parser(Parser):
-    def parse_new(self, raw_lines: list[str]) -> list[Reading]:
+    def parse_new(self, source: str, raw_lines: list[str]) -> list[Reading]:
         readings: list[Reading] = []
         for line in raw_lines:
             try:
