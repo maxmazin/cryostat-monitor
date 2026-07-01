@@ -156,5 +156,6 @@ sudo -u postgres psql -d cryo \
 - **UPS + healthchecks.io dead-man's switch** and the watchdog service — Phase 2
   (depends on Q2). `monitor the monitor` is essential but not part of closing
   Phase 0.
-- **Grafana** panel + `openclaw_ro` role — Phase 1 (one panel) / Phase 4.
+- **Grafana** dashboards — provisioning added in `server/grafana/` (see its
+  README to deploy on labmanager). `openclaw_ro` role — Phase 4.
 - **`pg_dump` → NAS via Restic**, retention policy — Phase 4 (Q6).

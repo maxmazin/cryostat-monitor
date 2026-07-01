@@ -1,0 +1,16 @@
+# Grafana dashboard provider for the cryostat dashboards.
+# Deploy to /etc/grafana/provisioning/dashboards/ on labmanager, and put the
+# dashboard JSON at the `path` below (see server/grafana/README.md).
+apiVersion: 1
+
+providers:
+  - name: cryostats
+    orgId: 1
+    folder: Cryostats
+    type: file
+    disableDeletion: false
+    allowUiUpdates: true          # let people tweak panels in the UI; JSON stays the source of truth
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards/cryostats
+      foldersFromFilesStructure: false

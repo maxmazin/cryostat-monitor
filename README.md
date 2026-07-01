@@ -130,9 +130,10 @@ reading lands a row — and additionally checks idempotency on re-POST:
   host daemon (multi-file tailer with offset/inode tracking + midnight rotation,
   idempotent SQLite spool, POST/ack/backfill loop) — all built and tested,
   including zero-duplicate backfill after daemon/network outage. Verified
-  end-to-end on real sample logs (daemon → ingest → Postgres). Remaining:
-  confirm the §11 channel-map/timezone with Ben, deploy the daemon as an NSSM
-  service on the host, and add one Grafana panel.
+  end-to-end on real sample logs (daemon → ingest → Postgres). Grafana
+  dashboard provisioning added (`server/grafana/`). Remaining: confirm the §11
+  channel-map/timezone with Ben and deploy the daemon as an NSSM service on the
+  host.
 
 Before Phase 1:
 - [`docs/questions-for-ben.md`](./docs/questions-for-ben.md) — open questions

@@ -1,0 +1,26 @@
+# Grafana datasource provisioning for the cryostat database.
+# Deploy to /etc/grafana/provisioning/datasources/ on labmanager.
+#
+# Grafana is a REDUNDANT visualization + "No Data" layer, NOT the alert path —
+# the watchdog is authoritative (§2). It therefore connects with a READ-ONLY
+# Postgres role (see server/grafana/README.md for the role's SQL). The password
+# is read from the CRYO_GRAFANA_DB_PASSWORD environment variable so it is not
+# committed; set it in Grafana's systemd unit or /etc/default/grafana-server.
+apiVersion: 1
+
+datasources:
+  - name: cryostat-postgres
+    uid: cryo_pg                 # referenced by the dashboard panels
+    type: postgres
+    access: proxy
+    url: 127.0.0.1:5432
+    user: grafana_ro
+    isDefault: true
+    editable: false
+    jsonData:
+      database: cryo
+      sslmode: disable           # local loopback connection
+      postgresVersion: 1600
+      timescaledb: false
+    secureJsonData:
+      password: $CRYO_GRAFANA_DB_PASSWORD

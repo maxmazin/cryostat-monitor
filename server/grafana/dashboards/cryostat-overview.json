@@ -1,0 +1,138 @@
+{
+  "uid": "cryostat-overview",
+  "title": "Cryostat overview",
+  "tags": ["cryostat"],
+  "timezone": "browser",
+  "editable": true,
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "annotations": { "list": [] },
+  "templating": {
+    "list": [
+      {
+        "name": "fridge",
+        "label": "Fridge",
+        "type": "query",
+        "datasource": { "type": "postgres", "uid": "cryo_pg" },
+        "query": "SELECT DISTINCT fridge FROM readings ORDER BY 1",
+        "refresh": 2,
+        "sort": 1,
+        "includeAll": false,
+        "multi": false
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Stage temperatures — $fridge",
+      "type": "timeseries",
+      "datasource": { "type": "postgres", "uid": "cryo_pg" },
+      "description": "Kelvin channels. Log Y so the mK mixing chamber and the ~50 K stage are both readable.",
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "kelvin",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "showPoints": "never",
+            "scaleDistribution": { "type": "log", "log": 10 }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right", "calcs": ["last", "min", "max"] },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "postgres", "uid": "cryo_pg" },
+          "format": "time_series",
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "SELECT ts AS \"time\", channel AS metric, value FROM readings WHERE fridge = '$fridge' AND unit = 'K' AND $__timeFilter(ts) ORDER BY ts"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Gauge pressures — $fridge",
+      "type": "timeseries",
+      "datasource": { "type": "postgres", "uid": "cryo_pg" },
+      "description": "mbar channels (raw gauge positions P1..P6 until the still line is mapped, §11 Q5). Log Y.",
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 9 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "pressurembar",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "showPoints": "never",
+            "scaleDistribution": { "type": "log", "log": 10 }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right", "calcs": ["last", "min", "max"] },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "postgres", "uid": "cryo_pg" },
+          "format": "time_series",
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "SELECT ts AS \"time\", channel AS metric, value FROM readings WHERE fridge = '$fridge' AND unit = 'mbar' AND $__timeFilter(ts) ORDER BY ts"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Data freshness (all fridges)",
+      "type": "table",
+      "datasource": { "type": "postgres", "uid": "cryo_pg" },
+      "description": "Seconds since data last ARRIVED (received_at). Redundant with the watchdog's SILENT alarm — the watchdog is authoritative (§2/§8).",
+      "gridPos": { "h": 7, "w": 24, "x": 0, "y": 18 },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "age (s)" },
+            "properties": [
+              { "id": "unit", "value": "s" },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    { "color": "green", "value": null },
+                    { "color": "red", "value": 240 }
+                  ]
+                }
+              },
+              { "id": "custom.cellOptions", "value": { "type": "color-background" } }
+            ]
+          }
+        ]
+      },
+      "options": { "showHeader": true },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "postgres", "uid": "cryo_pg" },
+          "format": "table",
+          "editorMode": "code",
+          "rawQuery": true,
+          "rawSql": "SELECT fridge, received_at AS \"last received\", round(EXTRACT(EPOCH FROM (now() - received_at))::numeric, 0) AS \"age (s)\" FROM last_seen ORDER BY received_at"
+        }
+      ]
+    }
+  ]
+}
