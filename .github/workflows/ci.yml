@@ -91,7 +91,10 @@ jobs:
         run: |
           python -m py_compile \
             host-daemon/daemon.py host-daemon/spool.py host-daemon/parsers/*.py \
-            server/watchdog/watchdog.py
+            server/watchdog/watchdog.py server/watchdog/db.py server/dbpool.py
+
+      - name: Syntax-check shell scripts
+        run: bash -n scripts/*.sh
 
       - name: Run server tests (unit + integration)
         working-directory: server

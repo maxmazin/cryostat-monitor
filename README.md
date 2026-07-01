@@ -134,13 +134,20 @@ reading lands a row — and additionally checks idempotency on re-POST:
   dashboard provisioning added (`server/grafana/`). Remaining: confirm the §11
   channel-map/timezone with Ben and deploy the daemon as an NSSM service on the
   host.
+- **Phase 2 — Watchdog: built and verified.** Deterministic staleness +
+  threshold alerts, persisted alert state, maintenance mutes, dedicated Slack
+  webhook, and the healthchecks.io heartbeat. All five §10 acceptance criteria
+  pass end-to-end against a live Postgres (`server/tests/test_watchdog_e2e.py`).
+  Remaining before deploy: the dedicated Slack webhook + healthchecks URL from
+  Ben (staleness monitoring needs nothing more; thresholds need the §11 map).
+- **Also done:** second BlueFors fridge (whitefridge) onboarded; nightly
+  `pg_dump` backups (`scripts/pg_backup.sh` + systemd timer).
 
-Before Phase 1:
-- [`docs/questions-for-ben.md`](./docs/questions-for-ben.md) — open questions
-  reordered by what blocks progress (lead: log samples + pick the ugliest fridge).
-- [`docs/deployment.md`](./docs/deployment.md) — stand the ingest service up on
-  labmanager with TLS and confirm reachability from a fridge host (the real
-  Phase 0 acceptance gate).
+What's needed next:
+- [`docs/questions-for-ben.md`](./docs/questions-for-ben.md) — open questions,
+  prioritized by what unblocks the most (deploy inputs, then the channel wiring).
+- [`docs/deployment.md`](./docs/deployment.md) — stand the services up on
+  labmanager with TLS and confirm reachability from a fridge host.
 
 See §10 of the spec for the full phased plan and §11 for open questions pending
 from Ben.
