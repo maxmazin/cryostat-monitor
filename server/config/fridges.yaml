@@ -56,16 +56,22 @@ fridges:
       # channel (P1..P6) — otherwise the watchdog logs a "configured channel has
       # no reading" warning every loop and the threshold silently never fires.
 
+  # Only list a fridge here once its host daemon is deployed and reporting. The
+  # watchdog SILENT-alarms on any configured fridge it has never seen, so a
+  # fridge with no data source (e.g. one still awaiting its parser) would page
+  # continuously. Add each of the following when its daemon goes live:
+  #
   # ADRs differ: no still/MXC; expect magnet/regen channels and deliberate
-  # warmups (handle via maintenance mutes — see §11 Q4).
-  adr_2:
-    poll_interval: 30
-    staleness_factor: 4
-    timezone: "America/Los_Angeles"
-    channels:
-      "50K":  { high: 70.0 }
-      "4K":   { high: 5.5 }
-      "GGG":  { high: 0.100 }
-      "FAA":  { high: 0.100 }
-
+  # warmups (handle via maintenance mutes — see §11 Q4). adr_2's parser is still
+  # a stub pending log samples (§11 Q5), so it stays commented out until then.
+  # adr_2:
+  #   poll_interval: 30
+  #   staleness_factor: 4
+  #   timezone: "America/Los_Angeles"
+  #   channels:
+  #     "50K":  { high: 70.0 }
+  #     "4K":   { high: 5.5 }
+  #     "GGG":  { high: 0.100 }
+  #     "FAA":  { high: 0.100 }
+  #
   # bluefors_3, adr_4, fridge_5: add once per-fridge log samples land (§11 Q5).

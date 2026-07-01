@@ -326,7 +326,8 @@ def test_load_config_parses_real_yaml():
     cfg = wd.load_config()
     assert cfg.check_interval == 15 and cfg.reminder_interval == 1800
     names = {f.name for f in cfg.fridges}
-    assert {"blackfridge", "adr_2"} <= names
+    # Only deployed fridges are active; adr_2 is commented out (stub parser).
+    assert names == {"blackfridge", "whitefridge"}
     bf = next(f for f in cfg.fridges if f.name == "blackfridge")
     assert bf.poll_interval == 60 and bf.staleness_factor == 4
     assert bf.channels["MXC"].high == 0.05
