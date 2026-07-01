@@ -127,7 +127,8 @@ reading lands a row — and additionally checks idempotency on re-POST:
   Postgres, idempotent writes, token auth, capped `/maintenance`. Verified
   end-to-end locally (`verify_phase0.sh`).
 - **Phase 1 — One fridge end-to-end: in progress.** BlueFors (blackfridge) parser,
-  host daemon (multi-file tailer with offset/inode tracking + midnight rotation,
+  host daemon (multi-file tailer with byte-offset + file-signature tracking that
+  survives midnight rotation and Windows shares where inode is unavailable,
   idempotent SQLite spool, POST/ack/backfill loop) — all built and tested,
   including zero-duplicate backfill after daemon/network outage. Verified
   end-to-end on real sample logs (daemon → ingest → Postgres). Grafana

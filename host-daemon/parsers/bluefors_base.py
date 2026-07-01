@@ -93,16 +93,23 @@ class BlueforsParser(Parser):
                 continue
             # Gauges follow the timestamp in groups of 6:
             #   sensor(CHn), name(Pn), state, value(mbar), unit, enabled
+            # Buffer this line's readings and commit them only if the whole line
+            # stays aligned: a misalignment partway through means the
+            # 6-fields-per-gauge assumption is wrong for this firmware, so the
+            # groups already parsed are just as suspect — drop the entire line
+            # rather than ship a mis-keyed prefix (a silent-wrong failure worse
+            # than a skip).
+            line_out: list[Reading] = []
+            aligned = True
             for i in range(2, len(fields) - (_FIELDS_PER_GAUGE - 1), _FIELDS_PER_GAUGE):
                 group = fields[i:i + _FIELDS_PER_GAUGE]
                 sensor = group[0]
                 # Structural guard: every group must start with a CH<n> sensor
-                # token. If it doesn't, the 6-fields-per-gauge assumption is wrong
-                # for this firmware and the groups are misaligned — bail on the
-                # whole line rather than emit mis-keyed pressures (a silent-wrong
-                # failure worse than a skip).
+                # token. If it doesn't, the groups are misaligned — discard the
+                # whole line (see above).
                 if not _SENSOR_RE.match(sensor):
                     self._skip(source, line)
+                    aligned = False
                     break
                 # A gauge is live iff its trailing `enabled` flag is "1". Do NOT
                 # gate on the `Pn` name being blank — some firmwares blank it on
@@ -123,7 +130,9 @@ class BlueforsParser(Parser):
                     log.debug("%s: unparseable gauge value %r in %s",
                               self.name, group[3], source)
                     continue
-                out.append(Reading(ts=ts, channel=channel, value=value, unit="mbar"))
+                line_out.append(Reading(ts=ts, channel=channel, value=value, unit="mbar"))
+            if aligned:
+                out.extend(line_out)
         return out
 
     def _skip(self, source: str, line: str) -> None:

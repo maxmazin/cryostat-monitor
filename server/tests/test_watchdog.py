@@ -64,13 +64,17 @@ def test_alerting_to_ok_clears():
     assert d.state == "OK" and d.notify == wd.CLEAR and d.write and d.last_notified is None
 
 
-def test_clear_while_muted_still_sends_if_already_paged():
-    # A RAISE was paged (last_notified set) before the mute; recovery while muted
-    # still sends CLEAR so the announced incident doesn't dangle open in Slack.
+def test_clear_while_muted_is_deferred_until_unmute():
+    # A RAISE was paged (last_notified set) before the mute; recovery WHILE muted
+    # must not announce mid-maintenance. State is held ALERTING (no write, no
+    # notify) so the CLEAR is delivered once the mute lifts.
     row = AlertRow("ALERTING", since=T0, last_notified=T0)
     now = T0 + timedelta(seconds=60)
     d = wd.decide_transition(row, bad=False, muted=True, now=now, reminder_interval=REMINDER)
-    assert d.state == "OK" and d.notify == wd.CLEAR and d.write
+    assert d.state == "ALERTING" and d.notify is None and not d.write
+    # Once unmuted and still recovered, the held incident finally clears.
+    d2 = wd.decide_transition(row, bad=False, muted=False, now=now, reminder_interval=REMINDER)
+    assert d2.state == "OK" and d2.notify == wd.CLEAR and d2.write
 
 
 def test_clear_while_muted_is_silent_if_never_paged():
@@ -265,14 +269,19 @@ def test_total_db_failure_suppresses_heartbeat(env):
     assert pings == []  # dead-man's switch will fire
 
 
-def test_one_flaky_fridge_does_not_stop_heartbeat(env):
+def test_flaky_fridge_suppresses_heartbeat_but_not_healthy_alerts(env):
     fake, sent, pings = env
+    # blackfridge is breaching (should still page); adr_2's reads raise.
     fake.seen["blackfridge"] = T0
-    fake.readings[("blackfridge", "MXC")] = LatestReading(0.01, T0, "K")
-    fake.broken.add("adr_2")  # adr_2's reads raise; blackfridge is fine
+    fake.readings[("blackfridge", "MXC")] = LatestReading(0.09, T0, "K")
+    fake.broken.add("adr_2")
     bad = wd.FridgeConfig("adr_2", 30, 4, {"4K": wd.ChannelLimits(high=5.5)})
     wd.check_once(_cfg([_bluefors(), bad]), now=T0 + timedelta(seconds=30))
-    assert pings == [True]  # one fridge failed, DB reachable -> heartbeat still fires
+    # A fridge left unevaluated is a blind spot: heartbeat is withheld so a
+    # sustained failure trips the dead-man's switch...
+    assert pings == []
+    # ...but the healthy fridge's alert still goes out.
+    assert len(sent) == 1 and "THRESHOLD" in sent[0]
 
 
 def test_staleness_uses_received_at_not_data_timestamp(env):
@@ -297,6 +306,19 @@ def test_missing_configured_channel_warns(env, caplog):
         wd.check_once(_cfg([_bluefors()]), now=T0 + timedelta(seconds=30))
     assert sent == [] and pings == [True]
     assert any("no reading" in r.message for r in caplog.records)
+
+
+def test_missing_channel_clears_dangling_alert(env, caplog):
+    import logging
+    fake, sent, pings = env
+    fake.seen["blackfridge"] = T0                          # live, not stale
+    # MXC was ALERTING, but its reading is now gone (e.g. retention pruned the
+    # last breaching row). It must CLEAR, not dangle ALERTING forever.
+    fake.state[("blackfridge", "MXC")] = AlertRow("ALERTING", since=T0, last_notified=T0)
+    with caplog.at_level(logging.WARNING, logger="cryo.watchdog"):
+        wd.check_once(_cfg([_bluefors()]), now=T0 + timedelta(seconds=30))
+    assert len(sent) == 1 and "RESOLVED" in sent[0]
+    assert fake.state[("blackfridge", "MXC")].state == "OK"
 
 
 def test_config_unit_mismatch_warns(env, caplog):

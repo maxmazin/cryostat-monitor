@@ -90,6 +90,15 @@ def test_maxigauge_ships_only_enabled_gauges(parser):
     assert [r.channel for r in rows] == ["P1", "P2", "P4", "P5", "P6"]  # P3 disabled
 
 
+def test_maxigauge_misalignment_discards_whole_line(parser):
+    # An extra field before CH2 shifts every later group off the 6-per-gauge grid.
+    # CH1 parses fine on its own, but once alignment is lost the whole line is
+    # suspect — none of it (not even the valid CH1 prefix) may be shipped.
+    line = ("30-06-26,00:00:20,CH1,P1  ,1, 2.00E-2,4,1,EXTRA,CH2,P2  ,1, 7.04E-1,0,1,"
+            "CH3,P3  ,1,-6.00E+0,0,1,\r\n")
+    assert parser.parse_new("maxigauge 26-06-30.log", [line]) == []
+
+
 # --------------------------------------------------------------------------- robustness
 @pytest.mark.parametrize("line", [
     "",

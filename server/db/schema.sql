@@ -29,8 +29,18 @@ CREATE TABLE IF NOT EXISTS last_seen (
     last_ts     timestamptz NOT NULL,
     received_at timestamptz NOT NULL DEFAULT now()
 );
--- Idempotent add for databases created before received_at existed.
-ALTER TABLE last_seen ADD COLUMN IF NOT EXISTS received_at timestamptz NOT NULL DEFAULT now();
+-- Migration for databases created before received_at existed. Add it NULLABLE
+-- first and backfill from last_ts — NOT now() — so a fridge that is CURRENTLY
+-- silent when the column is added does not get a fresh received_at that would
+-- make the watchdog treat it as just-seen and suppress the SILENT alarm for a
+-- full staleness window (§3.1). last_ts is the best available proxy for when we
+-- last heard from it, and it errs toward firing rather than masking silence.
+-- Then adopt the default + NOT NULL to match the fresh-CREATE definition above.
+-- All steps are idempotent: on a DB that already has the column they are no-ops.
+ALTER TABLE last_seen ADD COLUMN IF NOT EXISTS received_at timestamptz;
+UPDATE last_seen SET received_at = last_ts WHERE received_at IS NULL;
+ALTER TABLE last_seen ALTER COLUMN received_at SET DEFAULT now();
+ALTER TABLE last_seen ALTER COLUMN received_at SET NOT NULL;
 
 -- Active maintenance windows; watchdog suppresses alerts while now() < until_ts.
 CREATE TABLE IF NOT EXISTS maintenance (

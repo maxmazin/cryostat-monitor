@@ -29,5 +29,10 @@ pg_dump -Fc "$DB" -f "$out.partial"
 mv "$out.partial" "$out"
 echo "wrote $out"
 
-# Prune only our own dumps older than the retention window.
-find "$DIR" -maxdepth 1 -type f -name 'cryo-*.dump' -mtime "+$KEEP_DAYS" -print -delete
+# Prune only our own dumps older than the retention window. The dump above
+# already succeeded, so a prune hiccup (a file vanishing mid-scan, a lock, a
+# permission blip) must not fail the unit under `set -e` and mask a good backup
+# — warn and move on.
+if ! find "$DIR" -maxdepth 1 -type f -name 'cryo-*.dump' -mtime "+$KEEP_DAYS" -print -delete; then
+    echo "warning: pruning old dumps had errors (the new dump is intact)" >&2
+fi

@@ -19,6 +19,12 @@ class DbPool:
         self._pool: ConnectionPool | None = None
 
     def open(self, dsn: str | None = None, *, max_size: int) -> ConnectionPool:
+        # Guard against a double open() overwriting (and thus leaking) a live
+        # pool. The pool is meant to be opened exactly once per process at
+        # startup, so a second call is a bug — fail loud rather than strand the
+        # first pool's connections.
+        if self._pool is not None:
+            raise RuntimeError("connection pool already open; call close() first")
         dsn = dsn or os.environ["CRYO_DB_DSN"]
         self._pool = ConnectionPool(dsn, min_size=1, max_size=max_size, open=True)
         return self._pool

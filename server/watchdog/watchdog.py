@@ -168,10 +168,13 @@ def decide_transition(
     lifts and it is still bad, that None triggers a (belated) RAISE rather than a
     REMIND, so the first thing humans see is the alert, not a reminder.
 
-    Recovery while muted: if a RAISE was already paged before the mute
-    (last_notified set), a CLEAR is still sent so the announced incident does not
-    dangle open in Slack forever; an alert that only ever existed during the mute
-    (last_notified is None) clears silently.
+    Recovery while muted: muting suppresses ALL notifications (§3), CLEAR
+    included. An alert that only ever existed during the mute (last_notified is
+    None) clears silently. An alert that WAS paged before the mute (last_notified
+    set) is not announced mid-maintenance either — its ALERTING state is held
+    (not cleared) so the CLEAR is delivered once the mute lifts and the key is
+    still recovered, closing the announced incident then rather than during the
+    window operators asked to stay quiet.
     """
     state = row.state if row else "OK"
     since = row.since if row else now
@@ -193,10 +196,16 @@ def decide_transition(
 
     # not bad
     if state == "ALERTING":
-        if muted and last_notified is None:
-            # Only ever alerted during the mute -> clear silently.
+        if last_notified is None:
+            # Only ever alerted while muted (the RAISE was suppressed) -> nothing
+            # was ever announced, so clear silently.
             return Decision("OK", now, None, None, write=True)
-        # Not muted, or muted but already paged -> announce the recovery.
+        if muted:
+            # A real RAISE was paged before the mute. Don't announce recovery
+            # mid-maintenance (§3) and don't clear the state yet: hold ALERTING so
+            # the CLEAR goes out once the mute lifts and it is still recovered.
+            return Decision("ALERTING", since, last_notified, None, write=False)
+        # Not muted and previously paged -> announce the recovery.
         return Decision("OK", now, None, CLEAR, write=True)
     # OK and not bad: steady state. Never create a row for a healthy key.
     return Decision("OK", since, last_notified, None, write=False)
@@ -215,7 +224,11 @@ def format_alert(ctx: AlertContext, action: str) -> str:
     if action == CLEAR:
         if ctx.is_silent:
             return f"🟢 RESOLVED — *{ctx.fridge}* is reporting again."
-        value = f" (now {ctx.value:g} {ctx.unit})" if ctx.value is not None else ""
+        if ctx.value is None:
+            value = ""
+        else:
+            unit = f" {ctx.unit}" if ctx.unit else ""
+            value = f" (now {ctx.value:g}{unit})"
         return f"🟢 RESOLVED — *{ctx.fridge}* / {ctx.key} back within limits{value}."
 
     again = " (reminder)" if action == REMIND else ""
@@ -320,9 +333,14 @@ def _check_fridge(f: FridgeConfig, cfg: WatchdogConfig, now: datetime,
         if reading is None:
             # The fridge is live but this configured channel has no reading —
             # most often the config channel name matches nothing the parser emits
-            # (a silently-dead threshold). Surface it loudly instead of skipping.
+            # (a silently-dead threshold). Surface it loudly...
             log.warning("%s: configured channel %r has no reading — name mismatch "
                         "or not reported by this fridge?", f.name, channel)
+            # ...and evaluate it as not-bad so any prior threshold alert CLEARs
+            # instead of dangling ALERTING forever (e.g. after retention pruning
+            # removed the last breaching reading). Fridge-level silence is already
+            # handled by the SILENT check above.
+            _evaluate(AlertContext(f.name, channel), False, muted, cfg, now, pending)
             continue
         if limits.unit and reading.unit and limits.unit != reading.unit:
             log.warning("%s/%s: config unit %r != stored unit %r",
@@ -347,26 +365,39 @@ def check_once(cfg: WatchdogConfig, now: datetime | None = None) -> None:
     """One watchdog pass: evaluate every fridge, confirm the DB is reachable,
     heartbeat, then deliver notifications.
 
-    Per-fridge errors are caught so one flaky fridge can't stop the others. The
-    heartbeat is gated on a direct DB-reachability probe (db.ping) rather than an
-    inferred all-fridges-failed count: a watchdog that cannot read the DB must
-    not report itself healthy, so it stops heartbeating and the dead-man's switch
-    fires (§8). The heartbeat runs before the Slack sends so a Slack outage
-    cannot starve it."""
+    Per-fridge errors are caught so one flaky fridge can't stop the others, but
+    they DO suppress the heartbeat: a fridge left unevaluated is a monitoring
+    blind spot, and the dead-man's switch must reflect that, not just raw DB
+    reachability. The heartbeat is therefore gated on both a direct DB probe
+    (db.ping — a watchdog that can't read the DB must not report healthy) and a
+    clean sweep of every fridge. It runs before the Slack sends so a Slack outage
+    cannot starve it (§8)."""
     now = now or now_utc()
     pending: list[tuple[AlertContext, Decision]] = []
+    all_checked = True
     for f in cfg.fridges:
         try:
             _check_fridge(f, cfg, now, pending)
         except Exception:
             log.exception("error checking fridge %s", f.name)
+            all_checked = False
 
     try:
         db.ping()
     except Exception as exc:
         raise WatchdogError(f"database unreachable; suppressing heartbeat: {exc}")
 
-    heartbeat(cfg)
+    # Heartbeat BEFORE the Slack sends so a slow webhook can't starve the
+    # dead-man's switch — but only if EVERY fridge was actually evaluated. A
+    # fridge we failed to check is a blind spot, and a watchdog that heartbeats
+    # while blind reports itself healthy when it isn't (§8). A one-off blip just
+    # skips a single beat (within healthchecks.io's grace); a sustained blind
+    # spot trips the switch, which is the correct escalation. Pending alerts for
+    # the fridges that DID evaluate are still delivered below.
+    if all_checked:
+        heartbeat(cfg)
+    else:
+        log.error("not all fridges evaluated this pass; suppressing heartbeat")
     _send_pending(pending, cfg)
 
 

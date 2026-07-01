@@ -64,12 +64,12 @@ def to_utc(ts: datetime, tz: ZoneInfo) -> datetime:
 
 
 class LogTailer:
-    """Tracks (path -> inode, byte offset) across rotation (§6.2 step 1).
+    """Tracks (path -> file signature, byte offset) across rotation (§6.2 step 1).
 
     State is persisted to JSON so a restart resumes where it left off and reads
     whatever was appended while the daemon was down. A newly-seen file is read
-    from the start; an in-place rotation (same path, new inode) or a truncation
-    resets the offset to 0.
+    from the start; an in-place rotation (same path, new file signature — see
+    _signature) or a truncation resets the offset to 0.
     """
 
     def __init__(self, globs: list[str], state_path: str) -> None:
@@ -114,16 +114,32 @@ class LogTailer:
         lose them permanently."""
         self._save_state()
 
+    @staticmethod
+    def _signature(st: os.stat_result) -> str:
+        """Identity token for rotation detection. st_ino uniquely identifies a
+        file on POSIX and local NTFS, but is 0 on Windows network/mapped drives
+        and some non-NTFS volumes — collapsing every file to the same identity, so
+        an in-place rotation (same path, replaced file) would go undetected and
+        the stale offset would seek into the new file. When st_ino is unavailable,
+        fall back to the creation time, which is st_ctime on Windows and still
+        changes when a new file replaces one at the same path. (On POSIX st_ino is
+        always populated, so the ctime branch — where st_ctime is instead the
+        metadata-change time and shifts on every append — is never taken.)"""
+        if st.st_ino:
+            return f"ino:{st.st_ino}"
+        return f"ctime:{st.st_ctime_ns}"
+
     def _read_file(self, path: str) -> list[str]:
         st = os.stat(path)
+        sig = self._signature(st)
         prev = self.state.get(path)
-        if prev is None or prev.get("inode") != st.st_ino or st.st_size < prev.get("offset", 0):
+        if prev is None or prev.get("sig") != sig or st.st_size < prev.get("offset", 0):
             offset = 0   # new file, rotated-in-place, or truncated
         else:
             offset = prev["offset"]
 
         if offset >= st.st_size:
-            self.state[path] = {"inode": st.st_ino, "offset": st.st_size}
+            self.state[path] = {"sig": sig, "offset": st.st_size}
             return []
 
         with open(path, "rb") as fh:
@@ -133,10 +149,10 @@ class LogTailer:
         # Hold back a partial final line (no trailing newline) until it completes.
         last_nl = data.rfind(b"\n")
         if last_nl == -1:
-            self.state[path] = {"inode": st.st_ino, "offset": offset}
+            self.state[path] = {"sig": sig, "offset": offset}
             return []
         complete = data[: last_nl + 1]
-        self.state[path] = {"inode": st.st_ino, "offset": offset + len(complete)}
+        self.state[path] = {"sig": sig, "offset": offset + len(complete)}
         return complete.decode("ascii", errors="replace").splitlines()
 
 
