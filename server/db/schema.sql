@@ -21,10 +21,16 @@ CREATE TABLE IF NOT EXISTS readings (
 CREATE INDEX IF NOT EXISTS idx_readings_fridge_ts ON readings (fridge, ts DESC);
 
 -- Fast "latest value per fridge" without scanning history.
+--   last_ts     = max DATA timestamp (host clock, converted to UTC) — shown to humans.
+--   received_at = server clock when data last arrived — the staleness basis, so
+--                 a skewed fridge-host clock cannot mask real silence (§3.1, §12).
 CREATE TABLE IF NOT EXISTS last_seen (
-    fridge    text PRIMARY KEY,
-    last_ts   timestamptz NOT NULL  -- max data timestamp received
+    fridge      text PRIMARY KEY,
+    last_ts     timestamptz NOT NULL,
+    received_at timestamptz NOT NULL DEFAULT now()
 );
+-- Idempotent add for databases created before received_at existed.
+ALTER TABLE last_seen ADD COLUMN IF NOT EXISTS received_at timestamptz NOT NULL DEFAULT now();
 
 -- Active maintenance windows; watchdog suppresses alerts while now() < until_ts.
 CREATE TABLE IF NOT EXISTS maintenance (

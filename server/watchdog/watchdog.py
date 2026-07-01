@@ -53,6 +53,7 @@ class WatchdogError(Exception):
 class ChannelLimits:
     high: float | None = None
     low: float | None = None
+    unit: str | None = None    # expected stored unit (sanity-checked against readings)
 
 
 @dataclass
@@ -95,7 +96,9 @@ def load_config(path: Path | None = None) -> WatchdogConfig:
     fridges: list[FridgeConfig] = []
     for name, spec in (raw.get("fridges") or {}).items():
         channels = {
-            channel: ChannelLimits(high=limits.get("high"), low=limits.get("low"))
+            channel: ChannelLimits(
+                high=limits.get("high"), low=limits.get("low"), unit=limits.get("unit")
+            )
             for channel, limits in (spec.get("channels") or {}).items()
         }
         fridges.append(
@@ -119,17 +122,23 @@ def load_config(path: Path | None = None) -> WatchdogConfig:
 # --------------------------------------------------------------------------- state machine
 @dataclass
 class AlertContext:
-    """Everything needed to describe one alert key in a Slack message."""
+    """Everything needed to describe one alert key in a Slack message. The alert
+    kind is derived from the key (the SILENT staleness check uses key 'SILENT';
+    everything else is a channel threshold), so there is no separate `kind` field
+    to keep in sync."""
 
     fridge: str
     key: str                      # 'SILENT' or channel name
-    kind: str                     # 'SILENT' | 'THRESHOLD'
     value: float | None = None
     limit: float | None = None    # the limit that was crossed
     bound: str | None = None      # 'high' | 'low'
     unit: str | None = None
     data_ts: datetime | None = None
     age_seconds: float | None = None
+
+    @property
+    def is_silent(self) -> bool:
+        return self.key == "SILENT"
 
 
 @dataclass
@@ -158,6 +167,11 @@ def decide_transition(
     A key that went bad while muted carries last_notified=None; once the mute
     lifts and it is still bad, that None triggers a (belated) RAISE rather than a
     REMIND, so the first thing humans see is the alert, not a reminder.
+
+    Recovery while muted: if a RAISE was already paged before the mute
+    (last_notified set), a CLEAR is still sent so the announced incident does not
+    dangle open in Slack forever; an alert that only ever existed during the mute
+    (last_notified is None) clears silently.
     """
     state = row.state if row else "OK"
     since = row.since if row else now
@@ -179,8 +193,10 @@ def decide_transition(
 
     # not bad
     if state == "ALERTING":
-        if muted:
+        if muted and last_notified is None:
+            # Only ever alerted during the mute -> clear silently.
             return Decision("OK", now, None, None, write=True)
+        # Not muted, or muted but already paged -> announce the recovery.
         return Decision("OK", now, None, CLEAR, write=True)
     # OK and not bad: steady state. Never create a row for a healthy key.
     return Decision("OK", since, last_notified, None, write=False)
@@ -197,13 +213,13 @@ def format_alert(ctx: AlertContext, action: str) -> str:
     """Build the Slack message. SILENT is made visually distinct — it is the
     scary one (§8): no high reading accompanies a fridge that has gone dark."""
     if action == CLEAR:
-        if ctx.kind == "SILENT":
+        if ctx.is_silent:
             return f"🟢 RESOLVED — *{ctx.fridge}* is reporting again."
         value = f" (now {ctx.value:g} {ctx.unit})" if ctx.value is not None else ""
         return f"🟢 RESOLVED — *{ctx.fridge}* / {ctx.key} back within limits{value}."
 
     again = " (reminder)" if action == REMIND else ""
-    if ctx.kind == "SILENT":
+    if ctx.is_silent:
         age = "unknown" if ctx.age_seconds is None else f"{ctx.age_seconds:.0f}s"
         return (
             f"🔴 *SILENT*{again} — *{ctx.fridge}* has STOPPED reporting. "
@@ -248,36 +264,52 @@ def heartbeat(cfg: WatchdogConfig) -> None:
 
 
 # --------------------------------------------------------------------------- orchestration
-def transition(ctx: AlertContext, bad: bool, muted: bool, cfg: WatchdogConfig,
-               now: datetime) -> None:
-    """Apply the state machine for one alert key: read state, decide, notify,
-    then persist — but only persist after a successful notification, so a Slack
-    outage retries rather than silently marking the alert as handled."""
+def _evaluate(ctx: AlertContext, bad: bool, muted: bool, cfg: WatchdogConfig,
+              now: datetime, pending: list[tuple[AlertContext, Decision]]) -> None:
+    """Read the persisted state and decide the transition. A non-notifying state
+    change (e.g. a muted alert) is persisted immediately; a notification is
+    queued in `pending` so it can be sent AFTER the heartbeat — a slow Slack
+    endpoint must never delay the dead-man's switch (§8)."""
     decision = decide_transition(
         db.get_alert_state(ctx.fridge, ctx.key), bad, muted, now, cfg.reminder_interval
     )
-    if decision.notify is not None:
+    if decision.notify is None:
+        if decision.write:
+            db.upsert_alert_state(
+                ctx.fridge, ctx.key, decision.state, decision.since, decision.last_notified
+            )
+    else:
+        pending.append((ctx, decision))
+
+
+def _send_pending(pending: list[tuple[AlertContext, Decision]], cfg: WatchdogConfig) -> None:
+    """Deliver queued notifications, persisting each only after a successful send
+    so a Slack outage retries next loop rather than marking the alert handled."""
+    for ctx, decision in pending:
         if not send_slack(format_alert(ctx, decision.notify), cfg):
-            return  # leave alert_state untouched; retry on the next loop
-    if decision.write:
+            continue  # leave alert_state untouched; retry on the next loop
         db.upsert_alert_state(
             ctx.fridge, ctx.key, decision.state, decision.since, decision.last_notified
         )
 
 
-def _check_fridge(f: FridgeConfig, cfg: WatchdogConfig, now: datetime) -> None:
+def _check_fridge(f: FridgeConfig, cfg: WatchdogConfig, now: datetime,
+                  pending: list[tuple[AlertContext, Decision]]) -> None:
     muted = db.is_muted(f.name)
 
     # --- staleness (primary, §3.1) ---
+    # Age is measured from received_at (server arrival time), not the data
+    # timestamp, so a skewed fridge-host clock cannot mask real silence (§12).
     seen = db.last_seen(f.name)
     if seen is None:
-        stale, age = True, None
+        stale, age, last_ts = True, None, None
     else:
-        age = (now - seen).total_seconds()
+        age = (now - seen.received_at).total_seconds()
         stale = age > f.staleness_factor * f.poll_interval
-    transition(
-        AlertContext(f.name, "SILENT", "SILENT", data_ts=seen, age_seconds=age),
-        bad=stale, muted=muted, cfg=cfg, now=now,
+        last_ts = seen.last_ts
+    _evaluate(
+        AlertContext(f.name, "SILENT", data_ts=last_ts, age_seconds=age),
+        stale, muted, cfg, now, pending,
     )
     if stale:
         return  # silent -> data is untrustworthy, skip threshold checks
@@ -286,41 +318,56 @@ def _check_fridge(f: FridgeConfig, cfg: WatchdogConfig, now: datetime) -> None:
     for channel, limits in f.channels.items():
         reading = db.latest_reading(f.name, channel)
         if reading is None:
+            # The fridge is live but this configured channel has no reading —
+            # most often the config channel name matches nothing the parser emits
+            # (a silently-dead threshold). Surface it loudly instead of skipping.
+            log.warning("%s: configured channel %r has no reading — name mismatch "
+                        "or not reported by this fridge?", f.name, channel)
             continue
+        if limits.unit and reading.unit and limits.unit != reading.unit:
+            log.warning("%s/%s: config unit %r != stored unit %r",
+                        f.name, channel, limits.unit, reading.unit)
         if limits.high is not None and reading.value > limits.high:
             bound, limit = "high", limits.high
         elif limits.low is not None and reading.value < limits.low:
             bound, limit = "low", limits.low
         else:
             bound, limit = None, None
-        transition(
+        _evaluate(
             AlertContext(
-                f.name, channel, "THRESHOLD",
+                f.name, channel,
                 value=reading.value, limit=limit, bound=bound,
-                unit=reading.unit, data_ts=reading.ts,
+                unit=limits.unit or reading.unit, data_ts=reading.ts,
             ),
-            bad=bound is not None, muted=muted, cfg=cfg, now=now,
+            bound is not None, muted, cfg, now, pending,
         )
 
 
 def check_once(cfg: WatchdogConfig, now: datetime | None = None) -> None:
-    """One watchdog pass over all fridges, then the heartbeat.
+    """One watchdog pass: evaluate every fridge, confirm the DB is reachable,
+    heartbeat, then deliver notifications.
 
-    Per-fridge errors are caught so one flaky fridge can't stop the others or the
-    heartbeat. But if EVERY fridge check fails (e.g. the DB is down), we abort
-    before the heartbeat so the dead-man's switch fires — a watchdog that cannot
-    read the DB must not keep reporting itself healthy (§8)."""
+    Per-fridge errors are caught so one flaky fridge can't stop the others. The
+    heartbeat is gated on a direct DB-reachability probe (db.ping) rather than an
+    inferred all-fridges-failed count: a watchdog that cannot read the DB must
+    not report itself healthy, so it stops heartbeating and the dead-man's switch
+    fires (§8). The heartbeat runs before the Slack sends so a Slack outage
+    cannot starve it."""
     now = now or now_utc()
-    errors = 0
+    pending: list[tuple[AlertContext, Decision]] = []
     for f in cfg.fridges:
         try:
-            _check_fridge(f, cfg, now)
+            _check_fridge(f, cfg, now, pending)
         except Exception:
             log.exception("error checking fridge %s", f.name)
-            errors += 1
-    if cfg.fridges and errors == len(cfg.fridges):
-        raise WatchdogError("all fridge checks failed; suppressing heartbeat")
+
+    try:
+        db.ping()
+    except Exception as exc:
+        raise WatchdogError(f"database unreachable; suppressing heartbeat: {exc}")
+
     heartbeat(cfg)
+    _send_pending(pending, cfg)
 
 
 def now_utc() -> datetime:

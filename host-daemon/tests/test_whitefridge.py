@@ -59,6 +59,25 @@ def test_maxigauge_skips_disabled_gauge_even_when_blank(parser):
     assert [r.channel for r in rows] == ["P2"]
 
 
+def test_maxigauge_misaligned_line_emits_no_mis_keyed_pressures(parser):
+    # A firmware variant with a different field count per gauge would misalign the
+    # 6-field groups. The structural guard (each group must start with CHn) must
+    # prevent emitting mis-keyed pressures rather than fail silently.
+    line = ("30-06-26,00:00:02,CH1,        ,1,2.00e-02,1,CH2,        ,1,5.83e-02,1,"
+            "CH3,        ,1,9.12e+00,1\r\n")  # 5 fields per gauge, not 6
+    assert parser.parse_new("maxigauge 26-06-30.log", [line]) == []
+
+
+def test_maxigauge_skips_enabled_gauge_with_bad_value(parser):
+    # A live gauge reporting a non-numeric value (sensor fault) is skipped without
+    # dropping the whole line or raising; the other gauges still parse.
+    line = ("30-06-26,00:00:02,CH1,        ,1,------,4,1,CH2,        ,1,5.83e-02,0,1,"
+            "CH3,        ,1,9.12e+00,0,1,CH4,        ,1,2.73e+02,0,1,"
+            "CH5,        ,1,7.56e+02,0,1,CH6,        ,1,1.75e+00,0,1,\r\n")
+    rows = parser.parse_new("maxigauge 26-06-30.log", [line])
+    assert [r.channel for r in rows] == ["P2", "P3", "P4", "P5", "P6"]  # P1's bad value skipped
+
+
 def test_heaters_file_is_ignored(parser):
     # whitefridge has a Heaters file not present on blackfridge; not a reading source.
     assert parser.parse_new("Heaters 26-06-30.log", ["30-06-26,00:00:02,0,0.00e+00,0,0.00e+00\r\n"]) == []

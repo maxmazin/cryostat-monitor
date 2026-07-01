@@ -28,6 +28,8 @@ GAUGE_CHANNEL: dict[str, str] = {f"CH{i}": f"P{i}" for i in range(1, 7)}
 
 # "CH6 T 26-06-30.log" -> ("6", "T");  "CH1 R ..." -> ("1", "R")
 _CH_FILE_RE = re.compile(r"^CH(\d+)\s+([TR])\b")
+# A maxigauge gauge group must start with a CH<n> sensor token (alignment check).
+_SENSOR_RE = re.compile(r"^CH\d+$")
 _FIELDS_PER_GAUGE = 6
 
 
@@ -94,6 +96,14 @@ class BlueforsParser(Parser):
             for i in range(2, len(fields) - (_FIELDS_PER_GAUGE - 1), _FIELDS_PER_GAUGE):
                 group = fields[i:i + _FIELDS_PER_GAUGE]
                 sensor = group[0]
+                # Structural guard: every group must start with a CH<n> sensor
+                # token. If it doesn't, the 6-fields-per-gauge assumption is wrong
+                # for this firmware and the groups are misaligned — bail on the
+                # whole line rather than emit mis-keyed pressures (a silent-wrong
+                # failure worse than a skip).
+                if not _SENSOR_RE.match(sensor):
+                    self._skip(source, line)
+                    break
                 # A gauge is live iff its trailing `enabled` flag is "1". Do NOT
                 # gate on the `Pn` name being blank — some firmwares blank it on
                 # every line while the gauge is on (whitefridge does this), which
@@ -106,7 +116,12 @@ class BlueforsParser(Parser):
                 try:
                     value = float(group[3])
                 except ValueError:
-                    self._skip(source, line)
+                    # A live gauge with an unparseable value is a sensor fault,
+                    # not a malformed line. Skip just this gauge quietly — logging
+                    # a warning per gauge per poll would flood the log for the
+                    # duration of the fault.
+                    log.debug("%s: unparseable gauge value %r in %s",
+                              self.name, group[3], source)
                     continue
                 out.append(Reading(ts=ts, channel=channel, value=value, unit="mbar"))
         return out

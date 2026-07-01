@@ -8,33 +8,27 @@ Connection string comes from the CRYO_DB_DSN env var, e.g.
 """
 from __future__ import annotations
 
-import os
 from datetime import datetime
 
 from psycopg_pool import ConnectionPool
 
-_pool: ConnectionPool | None = None
+import dbpool
+
+# One pool per process; the lifecycle logic is shared with the watchdog (dbpool).
+_db = dbpool.DbPool()
 
 
 def init_pool(dsn: str | None = None) -> ConnectionPool:
-    """Open the global pool. Called once at app startup."""
-    global _pool
-    dsn = dsn or os.environ["CRYO_DB_DSN"]
-    _pool = ConnectionPool(dsn, min_size=1, max_size=8, open=True)
-    return _pool
+    """Open the pool. Called once at app startup."""
+    return _db.open(dsn, max_size=8)
 
 
 def close_pool() -> None:
-    global _pool
-    if _pool is not None:
-        _pool.close()
-        _pool = None
+    _db.close()
 
 
 def _get_pool() -> ConnectionPool:
-    if _pool is None:
-        raise RuntimeError("connection pool not initialized; call init_pool() first")
-    return _pool
+    return _db.get()
 
 
 # Bulk insert is idempotent: re-sent rows after an outage are dropped by the
@@ -46,13 +40,16 @@ _INSERT_SQL = """
     ON CONFLICT (fridge, channel, ts) DO NOTHING
 """
 
-# Keep last_seen at the max data timestamp ever received for the fridge. GREATEST
-# guards against out-of-order/backfill batches lowering it.
+# Keep last_ts at the max data timestamp ever received (GREATEST guards against
+# out-of-order/backfill batches lowering it). received_at always advances to the
+# server clock: it records when we last HEARD from the host, which is what the
+# watchdog measures staleness against (immune to fridge-host clock skew).
 _LAST_SEEN_SQL = """
-    INSERT INTO last_seen (fridge, last_ts)
-    VALUES (%s, %s)
+    INSERT INTO last_seen (fridge, last_ts, received_at)
+    VALUES (%s, %s, now())
     ON CONFLICT (fridge) DO UPDATE
-        SET last_ts = GREATEST(last_seen.last_ts, EXCLUDED.last_ts)
+        SET last_ts = GREATEST(last_seen.last_ts, EXCLUDED.last_ts),
+            received_at = now()
 """
 
 

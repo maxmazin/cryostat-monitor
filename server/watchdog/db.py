@@ -10,13 +10,15 @@ database the ingest service writes to.
 """
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from datetime import datetime
 
 from psycopg_pool import ConnectionPool
 
-_pool: ConnectionPool | None = None
+import dbpool
+
+# One pool per process; the lifecycle logic is shared with ingest (dbpool).
+_db = dbpool.DbPool()
 
 
 @dataclass
@@ -27,6 +29,12 @@ class LatestReading:
 
 
 @dataclass
+class LastSeen:
+    last_ts: datetime         # max DATA timestamp (host clock) — for display
+    received_at: datetime     # server clock when data last arrived — staleness basis
+
+
+@dataclass
 class AlertRow:
     state: str            # 'OK' | 'ALERTING'
     since: datetime
@@ -34,24 +42,25 @@ class AlertRow:
 
 
 def init_pool(dsn: str | None = None) -> ConnectionPool:
-    """Open the global pool. Called once at startup."""
-    global _pool
-    dsn = dsn or os.environ["CRYO_DB_DSN"]
-    _pool = ConnectionPool(dsn, min_size=1, max_size=4, open=True)
-    return _pool
+    """Open the pool. Called once at startup."""
+    return _db.open(dsn, max_size=4)
 
 
 def close_pool() -> None:
-    global _pool
-    if _pool is not None:
-        _pool.close()
-        _pool = None
+    _db.close()
 
 
 def _get_pool() -> ConnectionPool:
-    if _pool is None:
-        raise RuntimeError("connection pool not initialized; call init_pool() first")
-    return _pool
+    return _db.get()
+
+
+def ping() -> None:
+    """Prove the database is reachable. Raises if it is not — the watchdog uses
+    this to decide whether to heartbeat, rather than inferring DB health from
+    aggregate fridge-check failures (§8)."""
+    pool = _get_pool()
+    with pool.connection() as conn:
+        conn.execute("SELECT 1")
 
 
 def is_muted(fridge: str) -> bool:
@@ -65,15 +74,17 @@ def is_muted(fridge: str) -> bool:
     return row is not None
 
 
-def last_seen(fridge: str) -> datetime | None:
-    """Max data timestamp received for the fridge, or None if never seen."""
+def last_seen(fridge: str) -> LastSeen | None:
+    """Last-seen record for the fridge, or None if never seen. `received_at` is
+    the staleness basis (server arrival time); `last_ts` is the data timestamp
+    for display."""
     pool = _get_pool()
     with pool.connection() as conn:
         row = conn.execute(
-            "SELECT last_ts FROM last_seen WHERE fridge = %s",
+            "SELECT last_ts, received_at FROM last_seen WHERE fridge = %s",
             (fridge,),
         ).fetchone()
-    return row[0] if row else None
+    return LastSeen(last_ts=row[0], received_at=row[1]) if row else None
 
 
 def latest_reading(fridge: str, channel: str) -> LatestReading | None:

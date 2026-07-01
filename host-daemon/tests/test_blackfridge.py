@@ -80,6 +80,16 @@ def test_maxigauge_skips_disabled_gauges(parser):
     assert parser.parse_new("maxigauge 26-06-30.log", [line]) == []
 
 
+def test_maxigauge_ships_only_enabled_gauges(parser):
+    # Boundary the enabled-flag check governs: CH3 is disabled (trailing flag 0)
+    # among otherwise-live named gauges and must be dropped while the rest ship.
+    line = ("30-06-26,00:00:20,CH1,P1  ,1, 2.00E-2,4,1,CH2,P2  ,1, 7.04E-1,0,1,"
+            "CH3,P3  ,1,-6.00E+0,0,0,CH4,P4  ,1, 3.48E+2,0,1,CH5,P5  ,1, 6.99E+2,0,1,"
+            "CH6,P6,1, 1.05E+3,0,1,\r\n")
+    rows = parser.parse_new("maxigauge 26-06-30.log", [line])
+    assert [r.channel for r in rows] == ["P1", "P2", "P4", "P5", "P6"]  # P3 disabled
+
+
 # --------------------------------------------------------------------------- robustness
 @pytest.mark.parametrize("line", [
     "",

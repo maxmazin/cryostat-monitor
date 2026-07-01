@@ -53,14 +53,22 @@ def _exec(sql: str, params: tuple) -> None:
         conn.execute(sql, params)
 
 
+def test_ping_ok(_pool):
+    db.ping()  # reachable DB -> no exception
+
+
 def test_last_seen_absent_returns_none(fridge):
     assert db.last_seen(fridge) is None
 
 
-def test_last_seen_reads_row(fridge):
+def test_last_seen_reads_last_ts_and_received_at(fridge):
     ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
     _exec("INSERT INTO last_seen (fridge, last_ts) VALUES (%s, %s)", (fridge, ts))
-    assert db.last_seen(fridge) == ts
+    seen = db.last_seen(fridge)
+    assert seen is not None
+    assert seen.last_ts == ts
+    # received_at defaults to server now() on insert -> present and not the data ts.
+    assert seen.received_at is not None
 
 
 def test_is_muted_reflects_active_window(fridge):

@@ -29,7 +29,12 @@ fridges:
       "4K":    { high: 5.5 }
       "still": { high: 1.5 }
       "MXC":   { high: 0.050 }
-      "P_still": { high: 1.0, unit: "mbar" }
+      # Pressure thresholds are deferred: the BlueFors parser emits gauges by
+      # POSITION (channels P1..P6), and Ben has not yet confirmed which gauge is
+      # which line (§11 Q5). Add e.g. `"P2": { high: 1.0, unit: "mbar" }` once the
+      # still-line gauge is known. The channel name MUST match a parser-emitted
+      # channel (P1..P6) — otherwise the watchdog logs a "configured channel has
+      # no reading" warning every loop and the threshold silently never fires.
 
   # Same BlueFors logger family as blackfridge, different software build: ~10 s
   # log cadence (samples/whitefridge/notes.md). poll_interval here is the daemon's
@@ -44,7 +49,12 @@ fridges:
       "4K":    { high: 5.5 }
       "still": { high: 1.5 }
       "MXC":   { high: 0.050 }
-      "P_still": { high: 1.0, unit: "mbar" }
+      # Pressure thresholds are deferred: the BlueFors parser emits gauges by
+      # POSITION (channels P1..P6), and Ben has not yet confirmed which gauge is
+      # which line (§11 Q5). Add e.g. `"P2": { high: 1.0, unit: "mbar" }` once the
+      # still-line gauge is known. The channel name MUST match a parser-emitted
+      # channel (P1..P6) — otherwise the watchdog logs a "configured channel has
+      # no reading" warning every loop and the threshold silently never fires.
 
   # ADRs differ: no still/MXC; expect magnet/regen channels and deliberate
   # warmups (handle via maintenance mutes — see §11 Q4).

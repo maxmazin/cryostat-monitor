@@ -1,9 +1,9 @@
 """Unit tests for the watchdog (§8).
 
 The state machine (decide_transition) is pure and tested directly. The loop
-(check_once / transition) is tested with the db layer faked and Slack/heartbeat
-captured, so we exercise staleness, thresholds, muting, restart-no-respam, and
-the dead-man's-switch suppression without a live PostgreSQL or HTTP.
+(check_once) is tested with the db layer faked and Slack/heartbeat captured, so
+we exercise staleness, thresholds, muting, restart-no-respam, and the
+dead-man's-switch suppression without a live PostgreSQL or HTTP.
 """
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from watchdog import watchdog as wd
-from watchdog.db import AlertRow, LatestReading
+from watchdog.db import AlertRow, LastSeen, LatestReading
 
 REMINDER = 1800.0
 T0 = datetime(2026, 6, 30, 12, 0, 0, tzinfo=timezone.utc)
@@ -64,8 +64,18 @@ def test_alerting_to_ok_clears():
     assert d.state == "OK" and d.notify == wd.CLEAR and d.write and d.last_notified is None
 
 
-def test_clear_while_muted_is_silent():
+def test_clear_while_muted_still_sends_if_already_paged():
+    # A RAISE was paged (last_notified set) before the mute; recovery while muted
+    # still sends CLEAR so the announced incident doesn't dangle open in Slack.
     row = AlertRow("ALERTING", since=T0, last_notified=T0)
+    now = T0 + timedelta(seconds=60)
+    d = wd.decide_transition(row, bad=False, muted=True, now=now, reminder_interval=REMINDER)
+    assert d.state == "OK" and d.notify == wd.CLEAR and d.write
+
+
+def test_clear_while_muted_is_silent_if_never_paged():
+    # Alert only ever existed during the mute (never paged) -> clear silently.
+    row = AlertRow("ALERTING", since=T0, last_notified=None)
     now = T0 + timedelta(seconds=60)
     d = wd.decide_transition(row, bad=False, muted=True, now=now, reminder_interval=REMINDER)
     assert d.state == "OK" and d.notify is None and d.write
@@ -93,27 +103,27 @@ def test_steady_ok_no_row_is_noop():
 
 # --------------------------------------------------------------------------- formatting
 def test_silent_message_is_distinct_and_has_details():
-    ctx = wd.AlertContext("blackfridge", "SILENT", "SILENT", age_seconds=300, data_ts=T0)
+    ctx = wd.AlertContext("blackfridge", "SILENT", age_seconds=300, data_ts=T0)
     msg = wd.format_alert(ctx, wd.RAISE)
     assert "SILENT" in msg and "blackfridge" in msg and "300s" in msg
     assert "2026-06-30 12:00:00 UTC" in msg
 
 
 def test_threshold_message_has_value_limit_and_ts():
-    ctx = wd.AlertContext("blackfridge", "MXC", "THRESHOLD", value=0.08,
+    ctx = wd.AlertContext("blackfridge", "MXC", value=0.08,
                           limit=0.05, bound="high", unit="K", data_ts=T0)
     msg = wd.format_alert(ctx, wd.RAISE)
     assert "MXC" in msg and "0.08" in msg and "0.05" in msg and "high" in msg
 
 
 def test_reminder_message_marked():
-    ctx = wd.AlertContext("adr_2", "4K", "THRESHOLD", value=9.0, limit=5.5,
+    ctx = wd.AlertContext("adr_2", "4K", value=9.0, limit=5.5,
                           bound="high", unit="K", data_ts=T0)
     assert "(reminder)" in wd.format_alert(ctx, wd.REMIND)
 
 
 def test_clear_message():
-    ctx = wd.AlertContext("adr_2", "4K", "THRESHOLD", value=4.0, unit="K")
+    ctx = wd.AlertContext("adr_2", "4K", value=4.0, unit="K")
     assert "RESOLVED" in wd.format_alert(ctx, wd.CLEAR)
 
 
@@ -123,11 +133,16 @@ class FakeDB:
 
     def __init__(self):
         self.muted: set[str] = set()
-        self.seen: dict[str, datetime] = {}
+        self.seen: dict[str, datetime] = {}       # received_at (staleness basis)
+        self.data_ts: dict[str, datetime] = {}    # last_ts override (defaults to seen)
         self.readings: dict[tuple[str, str], LatestReading] = {}
         self.state: dict[tuple[str, str], AlertRow] = {}
         self.fail = False  # raise on every read to simulate a DB outage
         self.broken: set[str] = set()  # raise only for these fridges
+
+    def ping(self):
+        if self.fail:
+            raise RuntimeError("db down")
 
     def is_muted(self, fridge):
         if self.fail or fridge in self.broken:
@@ -137,7 +152,10 @@ class FakeDB:
     def last_seen(self, fridge):
         if self.fail:
             raise RuntimeError("db down")
-        return self.seen.get(fridge)
+        received_at = self.seen.get(fridge)
+        if received_at is None:
+            return None
+        return LastSeen(last_ts=self.data_ts.get(fridge, received_at), received_at=received_at)
 
     def latest_reading(self, fridge, channel):
         return self.readings.get((fridge, channel))
@@ -152,6 +170,7 @@ class FakeDB:
 @pytest.fixture
 def env(monkeypatch):
     fake = FakeDB()
+    monkeypatch.setattr(wd.db, "ping", fake.ping)
     monkeypatch.setattr(wd.db, "is_muted", fake.is_muted)
     monkeypatch.setattr(wd.db, "last_seen", fake.last_seen)
     monkeypatch.setattr(wd.db, "latest_reading", fake.latest_reading)
@@ -253,7 +272,42 @@ def test_one_flaky_fridge_does_not_stop_heartbeat(env):
     fake.broken.add("adr_2")  # adr_2's reads raise; blackfridge is fine
     bad = wd.FridgeConfig("adr_2", 30, 4, {"4K": wd.ChannelLimits(high=5.5)})
     wd.check_once(_cfg([_bluefors(), bad]), now=T0 + timedelta(seconds=30))
-    assert pings == [True]  # one fridge failed, heartbeat still fired
+    assert pings == [True]  # one fridge failed, DB reachable -> heartbeat still fires
+
+
+def test_staleness_uses_received_at_not_data_timestamp(env):
+    fake, sent, pings = env
+    # Host clock ran an hour fast: the data timestamp is in the future, but we
+    # last RECEIVED data long ago. Staleness must key off received_at so the dark
+    # fridge is still caught despite the future data ts.
+    fake.seen["blackfridge"] = T0                          # received_at (old)
+    fake.data_ts["blackfridge"] = T0 + timedelta(hours=1)  # skewed future data ts
+    fake.readings[("blackfridge", "MXC")] = LatestReading(0.01, T0, "K")
+    now = T0 + timedelta(seconds=4 * 60 + 1)               # past staleness window
+    wd.check_once(_cfg([_bluefors()]), now=now)
+    assert len(sent) == 1 and "SILENT" in sent[0]
+
+
+def test_missing_configured_channel_warns(env, caplog):
+    import logging
+    fake, sent, pings = env
+    fake.seen["blackfridge"] = T0                          # live, not stale
+    # MXC is configured (see _bluefors) but no reading is stored for it.
+    with caplog.at_level(logging.WARNING, logger="cryo.watchdog"):
+        wd.check_once(_cfg([_bluefors()]), now=T0 + timedelta(seconds=30))
+    assert sent == [] and pings == [True]
+    assert any("no reading" in r.message for r in caplog.records)
+
+
+def test_config_unit_mismatch_warns(env, caplog):
+    import logging
+    fake, sent, pings = env
+    fake.seen["blackfridge"] = T0
+    fake.readings[("blackfridge", "MXC")] = LatestReading(0.01, T0, "mK")  # stored mK
+    f = wd.FridgeConfig("blackfridge", 60, 4, {"MXC": wd.ChannelLimits(high=0.05, unit="K")})
+    with caplog.at_level(logging.WARNING, logger="cryo.watchdog"):
+        wd.check_once(_cfg([f]), now=T0 + timedelta(seconds=30))
+    assert any("config unit" in r.message for r in caplog.records)
 
 
 # --------------------------------------------------------------------------- slack-failure persistence
