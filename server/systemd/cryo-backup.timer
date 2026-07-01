@@ -1,0 +1,9 @@
+[Unit]
+Description=Run the cryostat-monitor PostgreSQL backup nightly
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+Persistent=true          # run on next boot if the machine was off at 03:30
+
+[Install]
+WantedBy=timers.target

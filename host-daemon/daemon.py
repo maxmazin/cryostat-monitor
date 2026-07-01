@@ -91,6 +91,10 @@ class LogTailer:
         os.replace(tmp, self.state_path)   # atomic on POSIX and Windows
 
     def read_new_lines(self) -> list[tuple[str, list[str]]]:
+        """Return newly-appended lines per file. Advances the offsets IN MEMORY
+        only — the caller must call commit() after the returned lines have been
+        durably spooled, so a crash in between re-reads them (the spool dedups)
+        rather than losing them (§3.2)."""
         results: list[tuple[str, list[str]]] = []
         paths = sorted({p for pattern in self.globs for p in glob.glob(pattern)})
         for path in paths:
@@ -101,8 +105,14 @@ class LogTailer:
                 continue
             if lines:
                 results.append((os.path.basename(path), lines))
-        self._save_state()
         return results
+
+    def commit(self) -> None:
+        """Persist the advanced read offsets. Call this only AFTER the lines from
+        read_new_lines() are durably spooled: persisting the cursor first would,
+        on a crash before the spool commit, skip past never-buffered lines and
+        lose them permanently."""
+        self._save_state()
 
     def _read_file(self, path: str) -> list[str]:
         st = os.stat(path)
@@ -163,6 +173,10 @@ def run_cycle(tailer: LogTailer, parser: Parser, spool: Spool, tz: ZoneInfo,
             r.ts = to_utc(r.ts, tz)
             readings.append(r)
     spool.append(readings)
+    # Advance the persisted read cursor only now that the readings are durably
+    # spooled — see LogTailer.commit(). A crash before this re-reads the lines
+    # next start and the spool dedups them; a crash after loses nothing.
+    tailer.commit()
 
     pending = spool.unacked()
     if pending and post(pending):

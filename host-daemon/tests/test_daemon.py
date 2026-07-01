@@ -76,12 +76,28 @@ def test_resumes_after_restart_and_reads_gap(tmp_path):
     f = tmp_path / "CH6 T 26-06-30.log"
     state = str(tmp_path / "state.json")
     _append_bytes(f, _ch6_line(0) + _ch6_line(1))
-    LogTailer([str(tmp_path / "CH6 T *.log")], state).read_new_lines()  # tailer #1
+    t1 = LogTailer([str(tmp_path / "CH6 T *.log")], state)             # tailer #1
+    t1.read_new_lines()
+    t1.commit()                                                        # readings spooled
     # ...daemon down; logger appends two more lines...
     _append_bytes(f, _ch6_line(2) + _ch6_line(3))
     tailer2 = LogTailer([str(tmp_path / "CH6 T *.log")], state)         # restart
     out = tailer2.read_new_lines()
     assert len(out[0][1]) == 2          # only the gap, not the first two again
+
+
+def test_offsets_not_persisted_until_commit(tmp_path):
+    # Durability: a crash after reading but before the spool commit must NOT
+    # advance the persisted offset — on restart the lines are re-read (and later
+    # dedup'd by the spool) rather than lost.
+    f = tmp_path / "CH6 T 26-06-30.log"
+    state = str(tmp_path / "state.json")
+    _append_bytes(f, _ch6_line(0) + _ch6_line(1))
+    t1 = LogTailer([str(tmp_path / "CH6 T *.log")], state)
+    t1.read_new_lines()                 # read, but crash before commit() (no commit)
+    tailer2 = LogTailer([str(tmp_path / "CH6 T *.log")], state)  # restart
+    out = tailer2.read_new_lines()
+    assert len(out[0][1]) == 2          # re-reads the same lines (no offset advanced)
 
 
 def test_new_file_read_from_start(tmp_path):

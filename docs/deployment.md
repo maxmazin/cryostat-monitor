@@ -152,10 +152,30 @@ sudo -u postgres psql -d cryo \
 
 ---
 
+## Database backups
+
+Nightly logical backups are scripted in `scripts/pg_backup.sh` (`pg_dump -Fc` to a
+local directory, pruning dumps older than `CRYO_BACKUP_KEEP_DAYS`, default 14). Run
+it on labmanager via the systemd timer:
+
+```bash
+sudo install -m755 scripts/pg_backup.sh /opt/cryostat-monitor/scripts/pg_backup.sh
+sudo install -m644 server/systemd/cryo-backup.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now cryo-backup.timer
+sudo systemctl start cryo-backup.service      # take one now to verify
+pg_restore --list /var/backups/cryostat/cryo-*.dump | head   # confirm it's readable
+```
+
+Point the site's existing **Restic → NAS** job at `/var/backups/cryostat` for
+offsite copies (§10 Phase 4). Restore with `pg_restore -d cryo <dump>`. The raw-data
+**retention/downsampling** decision (Q6) is separate and still open — these dumps
+protect the data regardless of that choice.
+
 ## Out of scope here (later phases)
 - **UPS + healthchecks.io dead-man's switch** and the watchdog service — Phase 2
   (depends on Q2). `monitor the monitor` is essential but not part of closing
   Phase 0.
 - **Grafana** dashboards — provisioning added in `server/grafana/` (see its
   README to deploy on labmanager). `openclaw_ro` role — Phase 4.
-- **`pg_dump` → NAS via Restic**, retention policy — Phase 4 (Q6).
+- **Restic → NAS** offsite wiring and the raw-data retention policy — Phase 4 (Q6).
