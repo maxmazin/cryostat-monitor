@@ -6,12 +6,12 @@
 
 ## Alert types
 
-### 🔴 SILENT — a fridge stopped reporting (the scary one)
+### SILENT state — a fridge stopped reporting
 
 The watchdog has not received data from `<fridge>` for longer than
-`staleness_factor × poll_interval`. **This does not mean the fridge is fine and
-the monitor is noisy — it means we are blind.** A crashed host or hung logger
-produces no high reading, so a warming fridge can hide behind silence.
+`staleness_factor × poll_interval`. Slack lifecycle alerts are not sent from
+stale data; a crashed host or hung logger produces no reliable lifecycle
+transition.
 
 Triage:
 1. Is the fridge host powered on and on the network? (ping / tailnet status)
@@ -20,15 +20,22 @@ Triage:
 4. Is `labmanager` / the ingest service up? (`systemctl status cryo-ingest`)
 5. If the fridge itself is warming, escalate to <FRIDGE OWNER>.
 
-### 🟠 THRESHOLD — a channel is out of range
+### Lifecycle Slack alerts
 
-`<channel>` on `<fridge>` crossed its configured limit. The Slack message
-includes the value, the limit crossed, and the data timestamp.
+Slack pages only on the four configured lifecycle milestones:
+
+1. Cooling started.
+2. Base temperature reached.
+3. Warming started.
+4. Room temperature reached.
+
+The Slack message includes the fridge, lifecycle channel, value, and data
+timestamp.
 
 Triage:
-1. Confirm against Grafana — is it a real excursion or a single bad sample?
-2. Is a planned warmup / regen underway? If so, set a maintenance mute.
-3. If unexpected, escalate to <FRIDGE OWNER>.
+1. Confirm the trend in Grafana.
+2. If unexpected, check whether a planned cooldown/warmup/regen is underway.
+3. If the transition is unexpected, escalate to <FRIDGE OWNER>.
 
 ### Dead-man's switch (healthchecks.io)
 
@@ -39,7 +46,7 @@ urgent case. Check power/UPS, then `cryo-watchdog` and `cryo-ingest` services.
 ## Maintenance mutes
 
 Before a planned warmup, sensor swap, or ADR regen, set a time-boxed mute so
-the channel doesn't page:
+lifecycle transitions do not page:
 
 - Via OpenClaw: "mute adr_2 for 6 h, regen cycle".
 - Via the API directly:

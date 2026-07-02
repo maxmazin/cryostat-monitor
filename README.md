@@ -4,9 +4,9 @@
 
 Temperature monitoring & alerting for the lab's five cryostats (dilution refrigerators and ADRs).
 
-Ships each fridge's logged readings to a central PostgreSQL database every ~30 s, acts as a **watchdog** that alerts Slack when a parameter goes out of range **or when a fridge stops reporting**, tolerates network/host outages without losing data, and exposes conversational status/mute via OpenClaw — without putting the LLM agent in the safety-critical alert path.
+Ships each fridge's logged readings to a central PostgreSQL database every ~30 s, acts as a **watchdog** that alerts Slack on fridge lifecycle transitions (starts cooling, reaches base temperature, starts warming, reaches room temperature), tolerates network/host outages without losing data, and exposes conversational status/mute via OpenClaw — without putting the LLM agent in the safety-critical alert path.
 
-> **Silence is the primary alarm.** A crashed host or hung logger produces no high reading, so per-fridge staleness detection — not threshold checking — is the most important feature. Read the full spec before changing the design.
+> **Silence is monitored separately.** A crashed host or hung logger produces no lifecycle transition, so per-fridge staleness detection is still evaluated before lifecycle state. Slack paging is reserved for lifecycle milestones.
 
 ## Spec
 
@@ -21,8 +21,8 @@ The authoritative design document is [`cryostat-monitor-handoff.md`](./cryostat-
 [labmanager, Ubuntu 24.04]
    ingest service (FastAPI) ──► PostgreSQL (readings, last_seen, maintenance, alert_state)
    watchdog (plain Python)  ◄── PostgreSQL   AUTHORITATIVE ALERT PATH, deterministic, no LLM
-        ├─ staleness check (per fridge)  ─► Slack (dedicated webhook)
-        ├─ threshold checks (per channel)
+        ├─ staleness check (per fridge; suppress stale lifecycle inference)
+        ├─ lifecycle transitions ─► Slack (dedicated webhook)
         └─ healthchecks.io heartbeat (dead-man's switch)
    OpenClaw (read-only role + /maintenance) ── NOT in alert path
 ```
@@ -135,12 +135,12 @@ reading lands a row — and additionally checks idempotency on re-POST:
   dashboard provisioning added (`server/grafana/`). Remaining: confirm the §11
   channel-map/timezone with Ben and deploy the daemon as an NSSM service on the
   host.
-- **Phase 2 — Watchdog: built and verified.** Deterministic staleness +
-  threshold alerts, persisted alert state, maintenance mutes, dedicated Slack
-  webhook, and the healthchecks.io heartbeat. All five §10 acceptance criteria
-  pass end-to-end against a live Postgres (`server/tests/test_watchdog_e2e.py`).
-  Remaining before deploy: the dedicated Slack webhook + healthchecks URL from
-  Ben (staleness monitoring needs nothing more; thresholds need the §11 map).
+- **Phase 2 — Watchdog: built and verified.** Deterministic staleness gating,
+  lifecycle transition alerts, persisted alert state, maintenance mutes,
+  dedicated Slack webhook, and the healthchecks.io heartbeat. The watchdog path
+  is covered end-to-end against a live Postgres (`server/tests/test_watchdog_e2e.py`).
+  Slack currently pages only for starts-cooling, reaches-base, starts-warming,
+  and reaches-room milestones.
 - **Also done:** second BlueFors fridge (whitefridge) onboarded; nightly
   `pg_dump` backups (`scripts/pg_backup.sh` + systemd timer).
 

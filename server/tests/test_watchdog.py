@@ -1,12 +1,7 @@
-"""Unit tests for the watchdog (§8).
-
-The state machine (decide_transition) is pure and tested directly. The loop
-(check_once) is tested with the db layer faked and Slack/heartbeat captured, so
-we exercise staleness, thresholds, muting, restart-no-respam, and the
-dead-man's-switch suppression without a live PostgreSQL or HTTP.
-"""
+"""Unit tests for the watchdog lifecycle alert policy."""
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -28,107 +23,97 @@ def _cfg(fridges=None, healthchecks_url="https://hc-ping.com/real"):
     )
 
 
-# --------------------------------------------------------------------------- state machine
-def test_ok_to_bad_raises():
-    d = wd.decide_transition(None, bad=True, muted=False, now=T0, reminder_interval=REMINDER)
-    assert d.state == "ALERTING" and d.notify == wd.RAISE and d.write
-    assert d.since == T0 and d.last_notified == T0
+def _lifecycle():
+    return wd.LifecycleConfig(
+        channel="MXC",
+        cooling_start_k=280.0,
+        base_temperature_k=0.050,
+        warming_start_k=0.100,
+        room_temperature_k=285.0,
+        unit="K",
+    )
 
 
-def test_ok_to_bad_while_muted_records_state_but_does_not_notify():
-    d = wd.decide_transition(None, bad=True, muted=True, now=T0, reminder_interval=REMINDER)
-    assert d.state == "ALERTING" and d.notify is None and d.write
-    assert d.last_notified is None  # never announced
+def _bluefors(staleness_factor=4, poll_interval=60):
+    return wd.FridgeConfig(
+        name="blackfridge",
+        poll_interval=poll_interval,
+        staleness_factor=staleness_factor,
+        lifecycle=_lifecycle(),
+    )
 
 
-def test_alerting_within_reminder_interval_is_silent():
-    row = AlertRow("ALERTING", since=T0, last_notified=T0)
-    now = T0 + timedelta(seconds=REMINDER - 1)
-    d = wd.decide_transition(row, bad=True, muted=False, now=now, reminder_interval=REMINDER)
-    assert d.notify is None and not d.write
-    assert d.last_notified == T0  # unchanged
+# --------------------------------------------------------------------------- lifecycle state machine
+def test_lifecycle_first_observation_baselines_silently():
+    d = wd.decide_lifecycle_transition(None, 293.0, _lifecycle(), False, T0)
+    assert d.state == wd.PHASE_ROOM
+    assert d.notify is None
+    assert d.write
 
 
-def test_alerting_past_reminder_interval_reminds():
-    row = AlertRow("ALERTING", since=T0, last_notified=T0)
-    now = T0 + timedelta(seconds=REMINDER + 1)
-    d = wd.decide_transition(row, bad=True, muted=False, now=now, reminder_interval=REMINDER)
-    assert d.notify == wd.REMIND and d.write
-    assert d.last_notified == now and d.since == T0  # since preserved across reminders
+def test_lifecycle_room_to_cooling_notifies():
+    row = AlertRow(wd.PHASE_ROOM, since=T0, last_notified=None)
+    now = T0 + timedelta(minutes=1)
+    d = wd.decide_lifecycle_transition(row, 279.0, _lifecycle(), False, now)
+    assert d.state == wd.PHASE_COOLING
+    assert d.notify == wd.STARTED_COOLING
+    assert d.since == now and d.last_notified == now
 
 
-def test_alerting_to_ok_clears():
-    row = AlertRow("ALERTING", since=T0, last_notified=T0)
-    now = T0 + timedelta(seconds=60)
-    d = wd.decide_transition(row, bad=False, muted=False, now=now, reminder_interval=REMINDER)
-    assert d.state == "OK" and d.notify == wd.CLEAR and d.write and d.last_notified is None
+def test_lifecycle_cooling_to_base_notifies():
+    row = AlertRow(wd.PHASE_COOLING, since=T0, last_notified=T0)
+    now = T0 + timedelta(hours=8)
+    d = wd.decide_lifecycle_transition(row, 0.025, _lifecycle(), False, now)
+    assert d.state == wd.PHASE_BASE
+    assert d.notify == wd.REACHED_BASE
 
 
-def test_clear_while_muted_is_deferred_until_unmute():
-    # A RAISE was paged (last_notified set) before the mute; recovery WHILE muted
-    # must not announce mid-maintenance. State is held ALERTING (no write, no
-    # notify) so the CLEAR is delivered once the mute lifts.
-    row = AlertRow("ALERTING", since=T0, last_notified=T0)
-    now = T0 + timedelta(seconds=60)
-    d = wd.decide_transition(row, bad=False, muted=True, now=now, reminder_interval=REMINDER)
-    assert d.state == "ALERTING" and d.notify is None and not d.write
-    # Once unmuted and still recovered, the held incident finally clears.
-    d2 = wd.decide_transition(row, bad=False, muted=False, now=now, reminder_interval=REMINDER)
-    assert d2.state == "OK" and d2.notify == wd.CLEAR and d2.write
+def test_lifecycle_base_to_warming_notifies():
+    row = AlertRow(wd.PHASE_BASE, since=T0, last_notified=T0)
+    now = T0 + timedelta(hours=1)
+    d = wd.decide_lifecycle_transition(row, 0.15, _lifecycle(), False, now)
+    assert d.state == wd.PHASE_WARMING
+    assert d.notify == wd.STARTED_WARMING
 
 
-def test_clear_while_muted_is_silent_if_never_paged():
-    # Alert only ever existed during the mute (never paged) -> clear silently.
-    row = AlertRow("ALERTING", since=T0, last_notified=None)
-    now = T0 + timedelta(seconds=60)
-    d = wd.decide_transition(row, bad=False, muted=True, now=now, reminder_interval=REMINDER)
-    assert d.state == "OK" and d.notify is None and d.write
+def test_lifecycle_warming_to_room_notifies():
+    row = AlertRow(wd.PHASE_WARMING, since=T0, last_notified=T0)
+    now = T0 + timedelta(days=1)
+    d = wd.decide_lifecycle_transition(row, 293.0, _lifecycle(), False, now)
+    assert d.state == wd.PHASE_ROOM
+    assert d.notify == wd.REACHED_ROOM
 
 
-def test_mute_then_unmute_belated_raise_not_reminder():
-    # Went bad while muted (last_notified None), mute now lifted, still bad.
-    row = AlertRow("ALERTING", since=T0, last_notified=None)
-    now = T0 + timedelta(seconds=5)
-    d = wd.decide_transition(row, bad=True, muted=False, now=now, reminder_interval=REMINDER)
-    assert d.notify == wd.RAISE and d.last_notified == now
-
-
-def test_alerting_still_bad_while_muted_no_write_no_notify():
-    row = AlertRow("ALERTING", since=T0, last_notified=T0)
-    now = T0 + timedelta(seconds=REMINDER + 1)
-    d = wd.decide_transition(row, bad=True, muted=True, now=now, reminder_interval=REMINDER)
-    assert d.notify is None and not d.write
-
-
-def test_steady_ok_no_row_is_noop():
-    d = wd.decide_transition(None, bad=False, muted=False, now=T0, reminder_interval=REMINDER)
-    assert d.state == "OK" and d.notify is None and not d.write
+def test_lifecycle_muted_transition_updates_state_without_slack():
+    row = AlertRow(wd.PHASE_ROOM, since=T0, last_notified=None)
+    now = T0 + timedelta(minutes=1)
+    d = wd.decide_lifecycle_transition(row, 279.0, _lifecycle(), True, now)
+    assert d.state == wd.PHASE_COOLING
+    assert d.notify is None
+    assert d.write
 
 
 # --------------------------------------------------------------------------- formatting
-def test_silent_message_is_distinct_and_has_details():
+def test_lifecycle_messages_are_named_milestones():
+    ctx = wd.AlertContext(
+        "blackfridge",
+        wd.LIFECYCLE_KEY,
+        value=279.0,
+        unit="K",
+        data_ts=T0,
+        phase="MXC",
+    )
+    assert "COOLING STARTED" in wd.format_alert(ctx, wd.STARTED_COOLING)
+    assert "BASE TEMPERATURE" in wd.format_alert(ctx, wd.REACHED_BASE)
+    assert "WARMING STARTED" in wd.format_alert(ctx, wd.STARTED_WARMING)
+    assert "ROOM TEMPERATURE" in wd.format_alert(ctx, wd.REACHED_ROOM)
+
+
+def test_silent_message_format_still_exists_for_status_debugging():
     ctx = wd.AlertContext("blackfridge", "SILENT", age_seconds=300, data_ts=T0)
     msg = wd.format_alert(ctx, wd.RAISE)
     assert "SILENT" in msg and "blackfridge" in msg and "300s" in msg
     assert "2026-06-30 12:00:00 UTC" in msg
-
-
-def test_threshold_message_has_value_limit_and_ts():
-    ctx = wd.AlertContext("blackfridge", "MXC", value=0.08,
-                          limit=0.05, bound="high", unit="K", data_ts=T0)
-    msg = wd.format_alert(ctx, wd.RAISE)
-    assert "MXC" in msg and "0.08" in msg and "0.05" in msg and "high" in msg
-
-
-def test_reminder_message_marked():
-    ctx = wd.AlertContext("adr_2", "4K", value=9.0, limit=5.5,
-                          bound="high", unit="K", data_ts=T0)
-    assert "(reminder)" in wd.format_alert(ctx, wd.REMIND)
-
-
-def test_clear_message():
-    ctx = wd.AlertContext("adr_2", "4K", value=4.0, unit="K")
-    assert "RESOLVED" in wd.format_alert(ctx, wd.CLEAR)
 
 
 # --------------------------------------------------------------------------- loop with fake DB
@@ -137,12 +122,12 @@ class FakeDB:
 
     def __init__(self):
         self.muted: set[str] = set()
-        self.seen: dict[str, datetime] = {}       # received_at (staleness basis)
-        self.data_ts: dict[str, datetime] = {}    # last_ts override (defaults to seen)
+        self.seen: dict[str, datetime] = {}
+        self.data_ts: dict[str, datetime] = {}
         self.readings: dict[tuple[str, str], LatestReading] = {}
         self.state: dict[tuple[str, str], AlertRow] = {}
-        self.fail = False  # raise on every read to simulate a DB outage
-        self.broken: set[str] = set()  # raise only for these fridges
+        self.fail = False
+        self.broken: set[str] = set()
 
     def ping(self):
         if self.fail:
@@ -189,76 +174,82 @@ def env(monkeypatch):
     return fake, sent, pings
 
 
-def _bluefors(staleness_factor=4, poll_interval=60):
-    return wd.FridgeConfig(
-        name="blackfridge", poll_interval=poll_interval, staleness_factor=staleness_factor,
-        channels={"MXC": wd.ChannelLimits(high=0.05)},
-    )
-
-
-def test_fresh_data_in_range_no_alert_and_heartbeats(env):
+def test_fresh_room_temperature_baselines_no_slack_and_heartbeats(env):
     fake, sent, pings = env
     fake.seen["blackfridge"] = T0
-    fake.readings[("blackfridge", "MXC")] = LatestReading(0.01, T0, "K")
+    fake.readings[("blackfridge", "MXC")] = LatestReading(293.0, T0, "K")
     wd.check_once(_cfg([_bluefors()]), now=T0 + timedelta(seconds=30))
     assert sent == [] and pings == [True]
+    assert fake.state[("blackfridge", wd.LIFECYCLE_KEY)].state == wd.PHASE_ROOM
 
 
-def test_stale_fridge_raises_silent_and_skips_thresholds(env):
+def test_room_to_cooling_sends_only_lifecycle_slack(env):
     fake, sent, pings = env
     fake.seen["blackfridge"] = T0
-    # Even though MXC is breaching, a stale fridge only pages SILENT.
-    fake.readings[("blackfridge", "MXC")] = LatestReading(0.09, T0, "K")
-    now = T0 + timedelta(seconds=4 * 60 + 1)  # past staleness_factor * poll_interval
-    wd.check_once(_cfg([_bluefors()]), now=now)
-    assert len(sent) == 1 and "SILENT" in sent[0]
-    assert fake.state[("blackfridge", "SILENT")].state == "ALERTING"
-    assert ("blackfridge", "MXC") not in fake.state  # threshold skipped while silent
-
-
-def test_never_seen_fridge_is_silent(env):
-    fake, sent, pings = env
-    wd.check_once(_cfg([_bluefors()]), now=T0)
-    assert len(sent) == 1 and "SILENT" in sent[0]
-
-
-def test_threshold_breach_raises(env):
-    fake, sent, pings = env
-    fake.seen["blackfridge"] = T0
-    fake.readings[("blackfridge", "MXC")] = LatestReading(0.09, T0, "K")
+    fake.state[("blackfridge", wd.LIFECYCLE_KEY)] = AlertRow(
+        wd.PHASE_ROOM, since=T0, last_notified=None
+    )
+    fake.readings[("blackfridge", "MXC")] = LatestReading(279.0, T0, "K")
     wd.check_once(_cfg([_bluefors()]), now=T0 + timedelta(seconds=30))
-    assert len(sent) == 1 and "THRESHOLD" in sent[0]
-    assert fake.state[("blackfridge", "MXC")].state == "ALERTING"
+    assert len(sent) == 1 and "COOLING STARTED" in sent[0]
+    assert "THRESHOLD" not in sent[0] and "SILENT" not in sent[0]
+    assert fake.state[("blackfridge", wd.LIFECYCLE_KEY)].state == wd.PHASE_COOLING
 
 
-def test_mute_suppresses_both_alert_types(env):
+def test_stale_fridge_records_silent_but_sends_no_slack(env):
     fake, sent, pings = env
-    fake.muted.add("blackfridge")
-    fake.readings[("blackfridge", "MXC")] = LatestReading(0.09, T0, "K")
-    # never seen -> would be SILENT, but muted
+    fake.seen["blackfridge"] = T0
+    fake.readings[("blackfridge", "MXC")] = LatestReading(279.0, T0, "K")
+    now = T0 + timedelta(seconds=4 * 60 + 1)
+    wd.check_once(_cfg([_bluefors()]), now=now)
+    assert sent == []
+    assert pings == [True]
+    assert fake.state[("blackfridge", "SILENT")].state == "ALERTING"
+    assert ("blackfridge", wd.LIFECYCLE_KEY) not in fake.state
+
+
+def test_never_seen_fridge_records_silent_but_sends_no_slack(env):
+    fake, sent, pings = env
     wd.check_once(_cfg([_bluefors()]), now=T0)
     assert sent == []
-    assert fake.state[("blackfridge", "SILENT")].state == "ALERTING"  # recorded, not sent
+    assert fake.state[("blackfridge", "SILENT")].state == "ALERTING"
 
 
-def test_restart_mid_alert_does_not_respam(env):
+def test_silent_state_clears_without_slack_even_if_old_row_was_notified(env):
     fake, sent, pings = env
-    # Persisted ALERTING from before a restart; still breaching, within reminder.
-    fake.state[("blackfridge", "MXC")] = AlertRow("ALERTING", since=T0, last_notified=T0)
     fake.seen["blackfridge"] = T0
-    fake.readings[("blackfridge", "MXC")] = LatestReading(0.09, T0, "K")
-    wd.check_once(_cfg([_bluefors()]), now=T0 + timedelta(seconds=60))
-    assert sent == []  # no re-page
+    fake.state[("blackfridge", "SILENT")] = AlertRow(
+        "ALERTING", since=T0 - timedelta(hours=1), last_notified=T0 - timedelta(hours=1)
+    )
+    fake.readings[("blackfridge", "MXC")] = LatestReading(293.0, T0, "K")
+    wd.check_once(_cfg([_bluefors()]), now=T0 + timedelta(seconds=30))
+    assert sent == []
+    assert fake.state[("blackfridge", "SILENT")].state == "OK"
+    assert fake.state[("blackfridge", "SILENT")].last_notified is None
 
 
-def test_recovery_after_breach_clears(env):
+def test_mute_suppresses_lifecycle_notification_but_updates_phase(env):
     fake, sent, pings = env
-    fake.state[("blackfridge", "MXC")] = AlertRow("ALERTING", since=T0, last_notified=T0)
+    fake.muted.add("blackfridge")
     fake.seen["blackfridge"] = T0
-    fake.readings[("blackfridge", "MXC")] = LatestReading(0.01, T0, "K")  # back in range
+    fake.state[("blackfridge", wd.LIFECYCLE_KEY)] = AlertRow(
+        wd.PHASE_ROOM, since=T0, last_notified=None
+    )
+    fake.readings[("blackfridge", "MXC")] = LatestReading(279.0, T0, "K")
+    wd.check_once(_cfg([_bluefors()]), now=T0 + timedelta(seconds=30))
+    assert sent == []
+    assert fake.state[("blackfridge", wd.LIFECYCLE_KEY)].state == wd.PHASE_COOLING
+
+
+def test_restart_mid_lifecycle_state_does_not_respam(env):
+    fake, sent, pings = env
+    fake.seen["blackfridge"] = T0
+    fake.state[("blackfridge", wd.LIFECYCLE_KEY)] = AlertRow(
+        wd.PHASE_COOLING, since=T0, last_notified=T0
+    )
+    fake.readings[("blackfridge", "MXC")] = LatestReading(279.0, T0, "K")
     wd.check_once(_cfg([_bluefors()]), now=T0 + timedelta(seconds=60))
-    assert len(sent) == 1 and "RESOLVED" in sent[0]
-    assert fake.state[("blackfridge", "MXC")].state == "OK"
+    assert sent == []
 
 
 def test_total_db_failure_suppresses_heartbeat(env):
@@ -266,81 +257,63 @@ def test_total_db_failure_suppresses_heartbeat(env):
     fake.fail = True
     with pytest.raises(wd.WatchdogError):
         wd.check_once(_cfg([_bluefors()]), now=T0)
-    assert pings == []  # dead-man's switch will fire
-
-
-def test_flaky_fridge_suppresses_heartbeat_but_not_healthy_alerts(env):
-    fake, sent, pings = env
-    # blackfridge is breaching (should still page); adr_2's reads raise.
-    fake.seen["blackfridge"] = T0
-    fake.readings[("blackfridge", "MXC")] = LatestReading(0.09, T0, "K")
-    fake.broken.add("adr_2")
-    bad = wd.FridgeConfig("adr_2", 30, 4, {"4K": wd.ChannelLimits(high=5.5)})
-    wd.check_once(_cfg([_bluefors(), bad]), now=T0 + timedelta(seconds=30))
-    # A fridge left unevaluated is a blind spot: heartbeat is withheld so a
-    # sustained failure trips the dead-man's switch...
     assert pings == []
-    # ...but the healthy fridge's alert still goes out.
-    assert len(sent) == 1 and "THRESHOLD" in sent[0]
+
+
+def test_flaky_fridge_suppresses_heartbeat_but_sends_other_lifecycle_events(env):
+    fake, sent, pings = env
+    fake.seen["blackfridge"] = T0
+    fake.state[("blackfridge", wd.LIFECYCLE_KEY)] = AlertRow(
+        wd.PHASE_ROOM, since=T0, last_notified=None
+    )
+    fake.readings[("blackfridge", "MXC")] = LatestReading(279.0, T0, "K")
+    fake.broken.add("adr_2")
+    bad = wd.FridgeConfig("adr_2", 30, 4, lifecycle=_lifecycle())
+    wd.check_once(_cfg([_bluefors(), bad]), now=T0 + timedelta(seconds=30))
+    assert pings == []
+    assert len(sent) == 1 and "COOLING STARTED" in sent[0]
 
 
 def test_staleness_uses_received_at_not_data_timestamp(env):
     fake, sent, pings = env
-    # Host clock ran an hour fast: the data timestamp is in the future, but we
-    # last RECEIVED data long ago. Staleness must key off received_at so the dark
-    # fridge is still caught despite the future data ts.
-    fake.seen["blackfridge"] = T0                          # received_at (old)
-    fake.data_ts["blackfridge"] = T0 + timedelta(hours=1)  # skewed future data ts
-    fake.readings[("blackfridge", "MXC")] = LatestReading(0.01, T0, "K")
-    now = T0 + timedelta(seconds=4 * 60 + 1)               # past staleness window
+    fake.seen["blackfridge"] = T0
+    fake.data_ts["blackfridge"] = T0 + timedelta(hours=1)
+    fake.readings[("blackfridge", "MXC")] = LatestReading(279.0, T0, "K")
+    now = T0 + timedelta(seconds=4 * 60 + 1)
     wd.check_once(_cfg([_bluefors()]), now=now)
-    assert len(sent) == 1 and "SILENT" in sent[0]
+    assert sent == []
+    assert fake.state[("blackfridge", "SILENT")].state == "ALERTING"
 
 
-def test_missing_configured_channel_warns(env, caplog):
-    import logging
+def test_missing_lifecycle_channel_warns(env, caplog):
     fake, sent, pings = env
-    fake.seen["blackfridge"] = T0                          # live, not stale
-    # MXC is configured (see _bluefors) but no reading is stored for it.
+    fake.seen["blackfridge"] = T0
     with caplog.at_level(logging.WARNING, logger="cryo.watchdog"):
         wd.check_once(_cfg([_bluefors()]), now=T0 + timedelta(seconds=30))
     assert sent == [] and pings == [True]
-    assert any("no reading" in r.message for r in caplog.records)
+    assert any("lifecycle channel" in r.message for r in caplog.records)
 
 
-def test_missing_channel_clears_dangling_alert(env, caplog):
-    import logging
-    fake, sent, pings = env
-    fake.seen["blackfridge"] = T0                          # live, not stale
-    # MXC was ALERTING, but its reading is now gone (e.g. retention pruned the
-    # last breaching row). It must CLEAR, not dangle ALERTING forever.
-    fake.state[("blackfridge", "MXC")] = AlertRow("ALERTING", since=T0, last_notified=T0)
-    with caplog.at_level(logging.WARNING, logger="cryo.watchdog"):
-        wd.check_once(_cfg([_bluefors()]), now=T0 + timedelta(seconds=30))
-    assert len(sent) == 1 and "RESOLVED" in sent[0]
-    assert fake.state[("blackfridge", "MXC")].state == "OK"
-
-
-def test_config_unit_mismatch_warns(env, caplog):
-    import logging
+def test_lifecycle_unit_mismatch_warns(env, caplog):
     fake, sent, pings = env
     fake.seen["blackfridge"] = T0
-    fake.readings[("blackfridge", "MXC")] = LatestReading(0.01, T0, "mK")  # stored mK
-    f = wd.FridgeConfig("blackfridge", 60, 4, {"MXC": wd.ChannelLimits(high=0.05, unit="K")})
+    fake.readings[("blackfridge", "MXC")] = LatestReading(293.0, T0, "mK")
     with caplog.at_level(logging.WARNING, logger="cryo.watchdog"):
-        wd.check_once(_cfg([f]), now=T0 + timedelta(seconds=30))
-    assert any("config unit" in r.message for r in caplog.records)
+        wd.check_once(_cfg([_bluefors()]), now=T0 + timedelta(seconds=30))
+    assert any("lifecycle unit" in r.message for r in caplog.records)
 
 
 # --------------------------------------------------------------------------- slack-failure persistence
-def test_failed_slack_send_does_not_persist_state(env, monkeypatch):
+def test_failed_slack_send_does_not_persist_lifecycle_transition(env, monkeypatch):
     fake, sent, pings = env
-    monkeypatch.setattr(wd, "send_slack", lambda msg, cfg: False)  # delivery fails
+    monkeypatch.setattr(wd, "send_slack", lambda msg, cfg: False)
     fake.seen["blackfridge"] = T0
-    fake.readings[("blackfridge", "MXC")] = LatestReading(0.09, T0, "K")
+    fake.state[("blackfridge", wd.LIFECYCLE_KEY)] = AlertRow(
+        wd.PHASE_ROOM, since=T0, last_notified=None
+    )
+    fake.readings[("blackfridge", "MXC")] = LatestReading(279.0, T0, "K")
     wd.check_once(_cfg([_bluefors()]), now=T0 + timedelta(seconds=30))
-    # state NOT written, so the next loop retries the RAISE
-    assert ("blackfridge", "MXC") not in fake.state
+    assert fake.state[("blackfridge", wd.LIFECYCLE_KEY)].state == wd.PHASE_ROOM
 
 
 # --------------------------------------------------------------------------- config
@@ -348,10 +321,13 @@ def test_load_config_parses_real_yaml():
     cfg = wd.load_config()
     assert cfg.check_interval == 15 and cfg.reminder_interval == 1800
     names = {f.name for f in cfg.fridges}
-    # Only deployed fridges are active; adr_2 is commented out (stub parser).
     assert names == {"blackfridge", "whitefridge"}
     bf = next(f for f in cfg.fridges if f.name == "blackfridge")
     assert bf.poll_interval == 60 and bf.staleness_factor == 4
-    assert bf.channels["MXC"].high == 0.05
-    # placeholder healthchecks URL is treated as unset
+    assert bf.lifecycle is not None
+    assert bf.lifecycle.channel == "MXC"
+    assert bf.lifecycle.cooling_start_k == 280.0
+    assert bf.lifecycle.base_temperature_k == 0.050
+    assert bf.lifecycle.warming_start_k == 0.100
+    assert bf.lifecycle.room_temperature_k == 285.0
     assert cfg.healthchecks_url is None

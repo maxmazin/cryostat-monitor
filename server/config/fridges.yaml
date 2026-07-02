@@ -1,13 +1,17 @@
-# Watchdog & channel configuration (§3.3: thresholds and intervals live in
+# Watchdog & lifecycle configuration (§3.3: temperatures and intervals live in
 # config, not code, so they can be tuned without redeploying).
 #
 # Units: temperatures in kelvin, pressures in mbar (canonical, see schema.sql).
-# A channel with only `high` set alerts when value > high; only `low` set
-# alerts when value < low; both set means alert outside [low, high].
 #
 # staleness: a fridge is SILENT when
 #     now() - last_seen > staleness_factor * poll_interval
 # poll_interval is the host daemon's reporting cadence in seconds.
+#
+# Slack policy: only lifecycle transitions page Slack:
+#   ROOM -> COOLING     when lifecycle.channel drops below cooling_start_k
+#   COOLING -> BASE     when it reaches base_temperature_k
+#   BASE -> WARMING     when it rises above warming_start_k
+#   WARMING -> ROOM     when it reaches room_temperature_k
 
 watchdog:
   check_interval: 15          # seconds between watchdog loops
@@ -24,17 +28,13 @@ fridges:
     poll_interval: 60         # BlueFors logs ~1/min (samples/blackfridge/notes.md)
     staleness_factor: 4       # SILENT after ~240 s of no data
     timezone: "America/Los_Angeles"
-    channels:
-      "50K":   { high: 70.0 }
-      "4K":    { high: 5.5 }
-      "still": { high: 1.5 }
-      "MXC":   { high: 0.050 }
-      # Pressure thresholds are deferred: the BlueFors parser emits gauges by
-      # POSITION (channels P1..P6), and Ben has not yet confirmed which gauge is
-      # which line (§11 Q5). Add e.g. `"P2": { high: 1.0, unit: "mbar" }` once the
-      # still-line gauge is known. The channel name MUST match a parser-emitted
-      # channel (P1..P6) — otherwise the watchdog logs a "configured channel has
-      # no reading" warning every loop and the threshold silently never fires.
+    lifecycle:
+      channel: "MXC"
+      cooling_start_k: 280.0
+      base_temperature_k: 0.050
+      warming_start_k: 0.100
+      room_temperature_k: 285.0
+      unit: "K"
 
   # Same BlueFors logger family as blackfridge, different software build: ~10 s
   # log cadence (samples/whitefridge/notes.md). poll_interval here is the daemon's
@@ -44,17 +44,13 @@ fridges:
     poll_interval: 30
     staleness_factor: 4       # SILENT after ~120 s of no data
     timezone: "America/Los_Angeles"
-    channels:
-      "50K":   { high: 70.0 }
-      "4K":    { high: 5.5 }
-      "still": { high: 1.5 }
-      "MXC":   { high: 0.050 }
-      # Pressure thresholds are deferred: the BlueFors parser emits gauges by
-      # POSITION (channels P1..P6), and Ben has not yet confirmed which gauge is
-      # which line (§11 Q5). Add e.g. `"P2": { high: 1.0, unit: "mbar" }` once the
-      # still-line gauge is known. The channel name MUST match a parser-emitted
-      # channel (P1..P6) — otherwise the watchdog logs a "configured channel has
-      # no reading" warning every loop and the threshold silently never fires.
+    lifecycle:
+      channel: "MXC"
+      cooling_start_k: 280.0
+      base_temperature_k: 0.050
+      warming_start_k: 0.100
+      room_temperature_k: 285.0
+      unit: "K"
 
   # Only list a fridge here once its host daemon is deployed and reporting. The
   # watchdog SILENT-alarms on any configured fridge it has never seen, so a
@@ -68,10 +64,12 @@ fridges:
   #   poll_interval: 30
   #   staleness_factor: 4
   #   timezone: "America/Los_Angeles"
-  #   channels:
-  #     "50K":  { high: 70.0 }
-  #     "4K":   { high: 5.5 }
-  #     "GGG":  { high: 0.100 }
-  #     "FAA":  { high: 0.100 }
+  #   lifecycle:
+  #     channel: "FAA"
+  #     cooling_start_k: 4.0
+  #     base_temperature_k: 0.100
+  #     warming_start_k: 0.150
+  #     room_temperature_k: 285.0
+  #     unit: "K"
   #
   # bluefors_3, adr_4, fridge_5: add once per-fridge log samples land (§11 Q5).

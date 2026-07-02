@@ -1,14 +1,14 @@
 """Watchdog — the safety core (§8). Plain Python, deterministic, NO LLM.
 
 Loop every check_interval:
-  - staleness check per fridge (PRIMARY: silence is the alarm, §3.1)
-  - threshold checks per channel (secondary)
+  - staleness check per fridge (PRIMARY: do not infer lifecycle from stale data)
+  - lifecycle checks per fridge (cooling/base/warming/room notifications)
   - maintenance mute (duration-capped, set via the /maintenance ingest endpoint)
   - persisted alert_state so a restart neither re-spams nor forgets (§8)
   - heartbeat to healthchecks.io every loop (dead-man's switch, §5/§8)
 
-The alert state machine (decide_transition) is pure and fully tested. All I/O
-lives at the edges: db.* for reads/writes, send_slack/heartbeat for HTTP.
+The lifecycle state machine is pure and fully tested. All I/O lives at the
+edges: db.* for reads/writes, send_slack/heartbeat for HTTP.
 
 Run as a module so relative imports resolve:  python -m watchdog.watchdog
 (see systemd/cryo-watchdog.service).
@@ -35,6 +35,18 @@ RAISE = "raise"
 REMIND = "remind"
 CLEAR = "clear"
 
+LIFECYCLE_KEY = "LIFECYCLE"
+PHASE_ROOM = "ROOM"
+PHASE_COOLING = "COOLING"
+PHASE_BASE = "BASE"
+PHASE_WARMING = "WARMING"
+_LIFECYCLE_PHASES = {PHASE_ROOM, PHASE_COOLING, PHASE_BASE, PHASE_WARMING}
+
+STARTED_COOLING = "started_cooling"
+REACHED_BASE = "reached_base"
+STARTED_WARMING = "started_warming"
+REACHED_ROOM = "reached_room"
+
 # A configured healthchecks_url still holding the template placeholder is treated
 # as unset, so we never ping a bogus check URL.
 _HC_PLACEHOLDER = "REPLACE-WITH-UUID"
@@ -50,10 +62,13 @@ class WatchdogError(Exception):
 
 # --------------------------------------------------------------------------- config
 @dataclass
-class ChannelLimits:
-    high: float | None = None
-    low: float | None = None
-    unit: str | None = None    # expected stored unit (sanity-checked against readings)
+class LifecycleConfig:
+    channel: str = "MXC"
+    cooling_start_k: float = 280.0
+    base_temperature_k: float = 0.050
+    warming_start_k: float = 0.100
+    room_temperature_k: float = 285.0
+    unit: str = "K"
 
 
 @dataclass
@@ -61,7 +76,7 @@ class FridgeConfig:
     name: str
     poll_interval: float
     staleness_factor: float
-    channels: dict[str, ChannelLimits]
+    lifecycle: LifecycleConfig | None = None
 
 
 @dataclass
@@ -95,18 +110,23 @@ def load_config(path: Path | None = None) -> WatchdogConfig:
 
     fridges: list[FridgeConfig] = []
     for name, spec in (raw.get("fridges") or {}).items():
-        channels = {
-            channel: ChannelLimits(
-                high=limits.get("high"), low=limits.get("low"), unit=limits.get("unit")
+        lifecycle = None
+        if spec.get("lifecycle"):
+            lc = spec["lifecycle"]
+            lifecycle = LifecycleConfig(
+                channel=lc.get("channel", "MXC"),
+                cooling_start_k=float(lc.get("cooling_start_k", 280.0)),
+                base_temperature_k=float(lc.get("base_temperature_k", 0.050)),
+                warming_start_k=float(lc.get("warming_start_k", 0.100)),
+                room_temperature_k=float(lc.get("room_temperature_k", 285.0)),
+                unit=lc.get("unit", "K"),
             )
-            for channel, limits in (spec.get("channels") or {}).items()
-        }
         fridges.append(
             FridgeConfig(
                 name=name,
                 poll_interval=float(spec["poll_interval"]),
                 staleness_factor=float(spec["staleness_factor"]),
-                channels=channels,
+                lifecycle=lifecycle,
             )
         )
 
@@ -122,93 +142,89 @@ def load_config(path: Path | None = None) -> WatchdogConfig:
 # --------------------------------------------------------------------------- state machine
 @dataclass
 class AlertContext:
-    """Everything needed to describe one alert key in a Slack message. The alert
-    kind is derived from the key (the SILENT staleness check uses key 'SILENT';
-    everything else is a channel threshold), so there is no separate `kind` field
-    to keep in sync."""
+    """Everything needed to describe one Slack/status message."""
 
     fridge: str
-    key: str                      # 'SILENT' or channel name
+    key: str                      # 'SILENT' or 'LIFECYCLE'
     value: float | None = None
-    limit: float | None = None    # the limit that was crossed
-    bound: str | None = None      # 'high' | 'low'
     unit: str | None = None
     data_ts: datetime | None = None
     age_seconds: float | None = None
+    phase: str | None = None
 
     @property
     def is_silent(self) -> bool:
         return self.key == "SILENT"
 
+    @property
+    def is_lifecycle(self) -> bool:
+        return self.key == LIFECYCLE_KEY
+
 
 @dataclass
 class Decision:
-    state: str                    # 'OK' | 'ALERTING'
+    state: str
     since: datetime
     last_notified: datetime | None
-    notify: str | None            # None | RAISE | REMIND | CLEAR
+    notify: str | None
     write: bool                   # whether alert_state needs persisting
 
 
-def decide_transition(
+def _initial_lifecycle_phase(value: float, cfg: LifecycleConfig) -> str:
+    if value >= cfg.room_temperature_k:
+        return PHASE_ROOM
+    if value <= cfg.base_temperature_k:
+        return PHASE_BASE
+    return PHASE_COOLING
+
+
+def decide_lifecycle_transition(
     row: AlertRow | None,
-    bad: bool,
+    value: float,
+    cfg: LifecycleConfig,
     muted: bool,
     now: datetime,
-    reminder_interval: float,
 ) -> Decision:
-    """Pure alert state machine (§8). A missing row is treated as OK.
-
-    OK   -> bad & not muted  : ALERTING, notify RAISE
-    ALERTING & still bad     : notify REMIND once now - last_notified > reminder
-    ALERTING -> not bad      : OK, notify CLEAR
-    muted                    : record the state change but suppress notifications
-
-    A key that went bad while muted carries last_notified=None; once the mute
-    lifts and it is still bad, that None triggers a (belated) RAISE rather than a
-    REMIND, so the first thing humans see is the alert, not a reminder.
-
-    Recovery while muted: muting suppresses ALL notifications (§3), CLEAR
-    included. An alert that only ever existed during the mute (last_notified is
-    None) clears silently. An alert that WAS paged before the mute (last_notified
-    set) is not announced mid-maintenance either — its ALERTING state is held
-    (not cleared) so the CLEAR is delivered once the mute lifts and the key is
-    still recovered, closing the announced incident then rather than during the
-    window operators asked to stay quiet.
-    """
-    state = row.state if row else "OK"
-    since = row.since if row else now
+    """Persist one lifecycle phase per fridge and notify only on named
+    operational milestones. First observation establishes a baseline silently so
+    restarting the watchdog does not announce an event that already happened."""
+    current = row.state if row and row.state in _LIFECYCLE_PHASES else None
     last_notified = row.last_notified if row else None
 
-    if bad:
-        if state == "OK":
-            if muted:
-                return Decision("ALERTING", now, None, None, write=True)
-            return Decision("ALERTING", now, now, RAISE, write=True)
-        # already ALERTING
-        if muted:
-            return Decision("ALERTING", since, last_notified, None, write=False)
-        if last_notified is None:
-            return Decision("ALERTING", since, now, RAISE, write=True)
-        if (now - last_notified).total_seconds() > reminder_interval:
-            return Decision("ALERTING", since, now, REMIND, write=True)
-        return Decision("ALERTING", since, last_notified, None, write=False)
+    if current is None:
+        return Decision(
+            _initial_lifecycle_phase(value, cfg),
+            now,
+            last_notified,
+            None,
+            write=True,
+        )
 
-    # not bad
-    if state == "ALERTING":
-        if last_notified is None:
-            # Only ever alerted while muted (the RAISE was suppressed) -> nothing
-            # was ever announced, so clear silently.
-            return Decision("OK", now, None, None, write=True)
-        if muted:
-            # A real RAISE was paged before the mute. Don't announce recovery
-            # mid-maintenance (§3) and don't clear the state yet: hold ALERTING so
-            # the CLEAR goes out once the mute lifts and it is still recovered.
-            return Decision("ALERTING", since, last_notified, None, write=False)
-        # Not muted and previously paged -> announce the recovery.
-        return Decision("OK", now, None, CLEAR, write=True)
-    # OK and not bad: steady state. Never create a row for a healthy key.
-    return Decision("OK", since, last_notified, None, write=False)
+    target = current
+    event = None
+
+    if current == PHASE_ROOM:
+        if value < cfg.cooling_start_k:
+            target, event = PHASE_COOLING, STARTED_COOLING
+    elif current == PHASE_COOLING:
+        if value <= cfg.base_temperature_k:
+            target, event = PHASE_BASE, REACHED_BASE
+        elif value >= cfg.room_temperature_k:
+            target, event = PHASE_ROOM, REACHED_ROOM
+    elif current == PHASE_BASE:
+        if value > cfg.warming_start_k:
+            target, event = PHASE_WARMING, STARTED_WARMING
+    elif current == PHASE_WARMING:
+        if value >= cfg.room_temperature_k:
+            target, event = PHASE_ROOM, REACHED_ROOM
+        elif value <= cfg.base_temperature_k:
+            target, event = PHASE_BASE, REACHED_BASE
+
+    if target == current:
+        return Decision(current, row.since, last_notified, None, write=False)
+    if muted:
+        return Decision(target, now, last_notified, None, write=True)
+    return Decision(target, now, now, event, write=True)
 
 
 # --------------------------------------------------------------------------- formatting
@@ -219,30 +235,36 @@ def _fmt_ts(ts: datetime | None) -> str:
 
 
 def format_alert(ctx: AlertContext, action: str) -> str:
-    """Build the Slack message. SILENT is made visually distinct — it is the
-    scary one (§8): no high reading accompanies a fridge that has gone dark."""
-    if action == CLEAR:
-        if ctx.is_silent:
-            return f"🟢 RESOLVED — *{ctx.fridge}* is reporting again."
-        if ctx.value is None:
-            value = ""
-        else:
-            unit = f" {ctx.unit}" if ctx.unit else ""
-            value = f" (now {ctx.value:g}{unit})"
-        return f"🟢 RESOLVED — *{ctx.fridge}* / {ctx.key} back within limits{value}."
+    """Build Slack/status messages for lifecycle events and silent state."""
+    if ctx.is_lifecycle:
+        return format_lifecycle_alert(ctx, action)
 
-    again = " (reminder)" if action == REMIND else ""
     if ctx.is_silent:
+        if action == CLEAR:
+            return f"🟢 RESOLVED — *{ctx.fridge}* is reporting again."
+        again = " (reminder)" if action == REMIND else ""
         age = "unknown" if ctx.age_seconds is None else f"{ctx.age_seconds:.0f}s"
         return (
             f"🔴 *SILENT*{again} — *{ctx.fridge}* has STOPPED reporting. "
             f"No data for {age}; last seen {_fmt_ts(ctx.data_ts)}. "
             f"The fridge may be warming unseen — investigate now."
         )
-    return (
-        f"🟠 THRESHOLD{again} — *{ctx.fridge}* / {ctx.key} = {ctx.value:g} {ctx.unit} "
-        f"crossed {ctx.bound} limit {ctx.limit:g}; data ts {_fmt_ts(ctx.data_ts)}."
-    )
+    raise ValueError(f"unknown alert context: {ctx.key}")
+
+
+def format_lifecycle_alert(ctx: AlertContext, action: str) -> str:
+    unit = f" {ctx.unit}" if ctx.unit else ""
+    value = "unknown" if ctx.value is None else f"{ctx.value:g}{unit}"
+    ts = _fmt_ts(ctx.data_ts)
+    if action == STARTED_COOLING:
+        return f"🔵 COOLING STARTED — *{ctx.fridge}* / {ctx.phase} is {value}; data ts {ts}."
+    if action == REACHED_BASE:
+        return f"🟣 BASE TEMPERATURE — *{ctx.fridge}* / {ctx.phase} reached {value}; data ts {ts}."
+    if action == STARTED_WARMING:
+        return f"🟠 WARMING STARTED — *{ctx.fridge}* / {ctx.phase} is {value}; data ts {ts}."
+    if action == REACHED_ROOM:
+        return f"⚪ ROOM TEMPERATURE — *{ctx.fridge}* / {ctx.phase} reached {value}; data ts {ts}."
+    raise ValueError(f"unknown lifecycle action: {action}")
 
 
 # --------------------------------------------------------------------------- I/O edges
@@ -277,24 +299,6 @@ def heartbeat(cfg: WatchdogConfig) -> None:
 
 
 # --------------------------------------------------------------------------- orchestration
-def _evaluate(ctx: AlertContext, bad: bool, muted: bool, cfg: WatchdogConfig,
-              now: datetime, pending: list[tuple[AlertContext, Decision]]) -> None:
-    """Read the persisted state and decide the transition. A non-notifying state
-    change (e.g. a muted alert) is persisted immediately; a notification is
-    queued in `pending` so it can be sent AFTER the heartbeat — a slow Slack
-    endpoint must never delay the dead-man's switch (§8)."""
-    decision = decide_transition(
-        db.get_alert_state(ctx.fridge, ctx.key), bad, muted, now, cfg.reminder_interval
-    )
-    if decision.notify is None:
-        if decision.write:
-            db.upsert_alert_state(
-                ctx.fridge, ctx.key, decision.state, decision.since, decision.last_notified
-            )
-    else:
-        pending.append((ctx, decision))
-
-
 def _send_pending(pending: list[tuple[AlertContext, Decision]], cfg: WatchdogConfig) -> None:
     """Deliver queued notifications, persisting each only after a successful send
     so a Slack outage retries next loop rather than marking the alert handled."""
@@ -304,6 +308,64 @@ def _send_pending(pending: list[tuple[AlertContext, Decision]], cfg: WatchdogCon
         db.upsert_alert_state(
             ctx.fridge, ctx.key, decision.state, decision.since, decision.last_notified
         )
+
+
+def _record_silent_state(fridge: str, stale: bool, now: datetime) -> None:
+    """Track whether a fridge is stale without producing Slack notifications."""
+    row = db.get_alert_state(fridge, "SILENT")
+    if stale:
+        since = row.since if row and row.state == "ALERTING" else now
+        if row is None or row.state != "ALERTING" or row.last_notified is not None:
+            db.upsert_alert_state(fridge, "SILENT", "ALERTING", since, None)
+        return
+
+    if row is not None and (row.state != "OK" or row.last_notified is not None):
+        db.upsert_alert_state(fridge, "SILENT", "OK", now, None)
+
+
+def _check_lifecycle(f: FridgeConfig, muted: bool, now: datetime,
+                     pending: list[tuple[AlertContext, Decision]]) -> None:
+    if f.lifecycle is None:
+        return
+    lc = f.lifecycle
+    reading = db.latest_reading(f.name, lc.channel)
+    if reading is None:
+        log.warning("%s: lifecycle channel %r has no reading — cannot infer "
+                    "cooling/base/warming/room state", f.name, lc.channel)
+        return
+    if lc.unit and reading.unit and lc.unit != reading.unit:
+        log.warning("%s/%s: lifecycle unit %r != stored unit %r",
+                    f.name, lc.channel, lc.unit, reading.unit)
+
+    decision = decide_lifecycle_transition(
+        db.get_alert_state(f.name, LIFECYCLE_KEY),
+        reading.value,
+        lc,
+        muted,
+        now,
+    )
+    if decision.notify is None:
+        if decision.write:
+            db.upsert_alert_state(
+                f.name,
+                LIFECYCLE_KEY,
+                decision.state,
+                decision.since,
+                decision.last_notified,
+            )
+        return
+
+    pending.append((
+        AlertContext(
+            f.name,
+            LIFECYCLE_KEY,
+            value=reading.value,
+            unit=lc.unit or reading.unit,
+            data_ts=reading.ts,
+            phase=lc.channel,
+        ),
+        decision,
+    ))
 
 
 def _check_fridge(f: FridgeConfig, cfg: WatchdogConfig, now: datetime,
@@ -320,45 +382,13 @@ def _check_fridge(f: FridgeConfig, cfg: WatchdogConfig, now: datetime,
         age = (now - seen.received_at).total_seconds()
         stale = age > f.staleness_factor * f.poll_interval
         last_ts = seen.last_ts
-    _evaluate(
-        AlertContext(f.name, "SILENT", data_ts=last_ts, age_seconds=age),
-        stale, muted, cfg, now, pending,
-    )
+    # Staleness is still recorded, but Slack is reserved for lifecycle events per
+    # the lab alert policy.
+    _record_silent_state(f.name, stale, now)
     if stale:
-        return  # silent -> data is untrustworthy, skip threshold checks
+        return  # silent -> data is untrustworthy, skip lifecycle checks
 
-    # --- thresholds (secondary) ---
-    for channel, limits in f.channels.items():
-        reading = db.latest_reading(f.name, channel)
-        if reading is None:
-            # The fridge is live but this configured channel has no reading —
-            # most often the config channel name matches nothing the parser emits
-            # (a silently-dead threshold). Surface it loudly...
-            log.warning("%s: configured channel %r has no reading — name mismatch "
-                        "or not reported by this fridge?", f.name, channel)
-            # ...and evaluate it as not-bad so any prior threshold alert CLEARs
-            # instead of dangling ALERTING forever (e.g. after retention pruning
-            # removed the last breaching reading). Fridge-level silence is already
-            # handled by the SILENT check above.
-            _evaluate(AlertContext(f.name, channel), False, muted, cfg, now, pending)
-            continue
-        if limits.unit and reading.unit and limits.unit != reading.unit:
-            log.warning("%s/%s: config unit %r != stored unit %r",
-                        f.name, channel, limits.unit, reading.unit)
-        if limits.high is not None and reading.value > limits.high:
-            bound, limit = "high", limits.high
-        elif limits.low is not None and reading.value < limits.low:
-            bound, limit = "low", limits.low
-        else:
-            bound, limit = None, None
-        _evaluate(
-            AlertContext(
-                f.name, channel,
-                value=reading.value, limit=limit, bound=bound,
-                unit=limits.unit or reading.unit, data_ts=reading.ts,
-            ),
-            bound is not None, muted, cfg, now, pending,
-        )
+    _check_lifecycle(f, muted, now, pending)
 
 
 def check_once(cfg: WatchdogConfig, now: datetime | None = None) -> None:

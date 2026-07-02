@@ -6,11 +6,14 @@ healthchecks.io heartbeat are pointed at a local capture server. This exercises
 the whole loop — config, SQL reads/writes, the state machine, Slack delivery,
 and the heartbeat — the way it will run on labmanager.
 
-Each §10 acceptance criterion maps to a test below:
-  - kill daemon -> SILENT alert          : test_silent_alert_when_data_goes_stale
-  - out-of-range value -> THRESHOLD/clear : test_threshold_alert_then_clear
-  - maintenance mute -> both suppressed   : test_maintenance_mute_suppresses_alerts
-  - restart mid-alert -> no re-spam       : test_restart_mid_alert_does_not_respam
+Each lifecycle acceptance criterion maps to a test below:
+  - stale daemon -> SILENT state, no Slack : test_silent_state_when_data_goes_stale
+  - room -> cooling Slack event           : test_lifecycle_cooling_started
+  - cooling -> base Slack event           : test_lifecycle_reaches_base
+  - base -> warming Slack event           : test_lifecycle_warming_started
+  - warming -> room Slack event           : test_lifecycle_reaches_room
+  - maintenance mute -> Slack suppressed  : test_maintenance_mute_suppresses_lifecycle
+  - restart mid-state -> no re-spam       : test_restart_mid_lifecycle_does_not_respam
   - heartbeat every loop (dead-man)       : test_heartbeat_pings_every_loop
 
 Gated on CRYO_TEST_DSN, same as the other integration tests.
@@ -118,7 +121,14 @@ def _cfg(capture, fridge: str, *, reminder: float = 1800) -> wd.WatchdogConfig:
         fridges=[
             wd.FridgeConfig(
                 name=fridge, poll_interval=60, staleness_factor=4,
-                channels={"MXC": wd.ChannelLimits(high=0.05)},
+                lifecycle=wd.LifecycleConfig(
+                    channel="MXC",
+                    cooling_start_k=280.0,
+                    base_temperature_k=0.050,
+                    warming_start_k=0.100,
+                    room_temperature_k=285.0,
+                    unit="K",
+                ),
             )
         ],
     )
@@ -154,64 +164,92 @@ def _mute(fridge: str, *, minutes: int) -> None:
         )
 
 
-def _preset_alert(fridge: str, key: str, *, notified_age_seconds: float) -> None:
+def _preset_lifecycle(fridge: str, state: str, *, notified_age_seconds: float = 60) -> None:
     ln = datetime.now(UTC) - timedelta(seconds=notified_age_seconds)
     with db._get_pool().connection() as conn:
         conn.execute(
             "INSERT INTO alert_state (fridge, alert_key, state, since, last_notified) "
-            "VALUES (%s, %s, 'ALERTING', %s, %s)",
-            (fridge, key, ln, ln),
+            "VALUES (%s, %s, %s, %s, %s)",
+            (fridge, wd.LIFECYCLE_KEY, state, ln, ln),
         )
 
 
 # --------------------------------------------------------------------------- acceptance tests
-def test_silent_alert_when_data_goes_stale(capture, fridge):
+def test_silent_state_when_data_goes_stale(capture, fridge):
     capture.reset()
     # Last data arrived well past staleness_factor * poll_interval (4 * 60 s).
     _set_last_seen(fridge, age_seconds=1000)
     wd.check_once(_cfg(capture, fridge))
-    assert any("SILENT" in m for m in capture.slack), capture.slack
+    assert capture.slack == []
     assert capture.beats == 1
     assert db.get_alert_state(fridge, "SILENT").state == "ALERTING"
 
 
-def test_threshold_alert_then_clear(capture, fridge):
+def test_lifecycle_cooling_started(capture, fridge):
     now = datetime.now(UTC)
     cfg = _cfg(capture, fridge)
-
-    # Fresh data, breaching value -> THRESHOLD alert.
     capture.reset()
+    _preset_lifecycle(fridge, wd.PHASE_ROOM)
     _set_last_seen(fridge, age_seconds=5)
-    _add_reading(fridge, 0.09, now - timedelta(minutes=2))  # > high=0.05
+    _add_reading(fridge, 279.0, now - timedelta(minutes=1))
     wd.check_once(cfg)
-    assert any("THRESHOLD" in m for m in capture.slack), capture.slack
-    assert db.get_alert_state(fridge, "MXC").state == "ALERTING"
+    assert any("COOLING STARTED" in m for m in capture.slack), capture.slack
+    assert db.get_alert_state(fridge, wd.LIFECYCLE_KEY).state == wd.PHASE_COOLING
 
-    # A newer, in-range reading -> RESOLVED.
+
+def test_lifecycle_reaches_base(capture, fridge):
+    now = datetime.now(UTC)
+    cfg = _cfg(capture, fridge)
     capture.reset()
+    _preset_lifecycle(fridge, wd.PHASE_COOLING)
     _set_last_seen(fridge, age_seconds=5)
-    _add_reading(fridge, 0.01, now - timedelta(minutes=1))  # newer, within limit
+    _add_reading(fridge, 0.025, now - timedelta(minutes=1))
     wd.check_once(cfg)
-    assert any("RESOLVED" in m for m in capture.slack), capture.slack
-    assert db.get_alert_state(fridge, "MXC").state == "OK"
+    assert any("BASE TEMPERATURE" in m for m in capture.slack), capture.slack
+    assert db.get_alert_state(fridge, wd.LIFECYCLE_KEY).state == wd.PHASE_BASE
 
 
-def test_maintenance_mute_suppresses_alerts(capture, fridge):
+def test_lifecycle_warming_started(capture, fridge):
+    now = datetime.now(UTC)
+    cfg = _cfg(capture, fridge)
     capture.reset()
-    _set_last_seen(fridge, age_seconds=1000)  # would be SILENT
+    _preset_lifecycle(fridge, wd.PHASE_BASE)
+    _set_last_seen(fridge, age_seconds=5)
+    _add_reading(fridge, 0.15, now - timedelta(minutes=1))
+    wd.check_once(cfg)
+    assert any("WARMING STARTED" in m for m in capture.slack), capture.slack
+    assert db.get_alert_state(fridge, wd.LIFECYCLE_KEY).state == wd.PHASE_WARMING
+
+
+def test_lifecycle_reaches_room(capture, fridge):
+    now = datetime.now(UTC)
+    cfg = _cfg(capture, fridge)
+    capture.reset()
+    _preset_lifecycle(fridge, wd.PHASE_WARMING)
+    _set_last_seen(fridge, age_seconds=5)
+    _add_reading(fridge, 293.0, now - timedelta(minutes=1))
+    wd.check_once(cfg)
+    assert any("ROOM TEMPERATURE" in m for m in capture.slack), capture.slack
+    assert db.get_alert_state(fridge, wd.LIFECYCLE_KEY).state == wd.PHASE_ROOM
+
+
+def test_maintenance_mute_suppresses_lifecycle(capture, fridge):
+    capture.reset()
+    _preset_lifecycle(fridge, wd.PHASE_ROOM)
+    _set_last_seen(fridge, age_seconds=5)
+    _add_reading(fridge, 279.0, datetime.now(UTC) - timedelta(minutes=1))
     _mute(fridge, minutes=60)
     wd.check_once(_cfg(capture, fridge))
     assert capture.slack == []                # suppressed
     assert capture.beats == 1                 # but still heartbeats
-    assert db.get_alert_state(fridge, "SILENT").state == "ALERTING"  # recorded, not sent
+    assert db.get_alert_state(fridge, wd.LIFECYCLE_KEY).state == wd.PHASE_COOLING
 
 
-def test_restart_mid_alert_does_not_respam(capture, fridge):
+def test_restart_mid_lifecycle_does_not_respam(capture, fridge):
     capture.reset()
-    # As if a RAISE was paged just before a watchdog restart, still within reminder.
-    _preset_alert(fridge, "MXC", notified_age_seconds=60)
+    _preset_lifecycle(fridge, wd.PHASE_COOLING, notified_age_seconds=60)
     _set_last_seen(fridge, age_seconds=5)
-    _add_reading(fridge, 0.09, datetime.now(UTC) - timedelta(minutes=1))  # still breaching
+    _add_reading(fridge, 279.0, datetime.now(UTC) - timedelta(minutes=1))
     wd.check_once(_cfg(capture, fridge))
     assert capture.slack == []                # no re-page
     assert capture.beats == 1
@@ -220,7 +258,7 @@ def test_restart_mid_alert_does_not_respam(capture, fridge):
 def test_heartbeat_pings_every_loop(capture, fridge):
     capture.reset()
     _set_last_seen(fridge, age_seconds=5)
-    _add_reading(fridge, 0.01, datetime.now(UTC) - timedelta(minutes=1))  # healthy
+    _add_reading(fridge, 293.0, datetime.now(UTC) - timedelta(minutes=1))
     wd.check_once(_cfg(capture, fridge))
     wd.check_once(_cfg(capture, fridge))
     assert capture.beats == 2
