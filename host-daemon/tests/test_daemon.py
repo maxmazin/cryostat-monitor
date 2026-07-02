@@ -210,6 +210,12 @@ def test_validate_config_requires_network_keys_only_when_asked():
         validate_config(cfg, require_network=True)
 
 
+def test_validate_config_timezone_optional_defaults_to_lab_zone():
+    cfg = _valid_cfg()
+    del cfg["timezone"]
+    validate_config(cfg, require_network=True)   # no raise: falls back to the default
+
+
 def test_validate_config_requires_log_globs():
     cfg = _valid_cfg()
     del cfg["log_globs"]

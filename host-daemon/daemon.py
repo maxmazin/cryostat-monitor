@@ -43,6 +43,10 @@ from spool import Spool
 
 log = logging.getLogger("cryo.daemon")
 
+# The lab's timezone. Used when a config omits `timezone`, so hosts don't each
+# have to set it; still overridable per config for a fridge elsewhere.
+DEFAULT_TIMEZONE = "America/Los_Angeles"
+
 
 class ConfigError(Exception):
     """A config file is missing a required key or has an invalid value. Raised at
@@ -59,7 +63,7 @@ def load_config(path: str) -> dict:
 def validate_config(cfg: dict, *, require_network: bool) -> None:
     """Fail fast on a missing/invalid config. `require_network` adds the keys the
     live daemon needs to POST (server_url, token); a --dry-run doesn't need them."""
-    required = ["fridge", "parser", "timezone"]
+    required = ["fridge", "parser"]
     if require_network:
         required += ["server_url", "token"]
     missing = [k for k in required if not cfg.get(k)]
@@ -67,11 +71,12 @@ def validate_config(cfg: dict, *, require_network: bool) -> None:
         raise ConfigError(f"config missing required key(s): {', '.join(missing)}")
     if not (cfg.get("log_globs") or cfg.get("log_glob")):
         raise ConfigError("config must set 'log_globs' (or 'log_glob')")
+    tz_name = cfg.get("timezone", DEFAULT_TIMEZONE)
     try:
-        ZoneInfo(cfg["timezone"])
+        ZoneInfo(tz_name)
     except Exception as exc:
         raise ConfigError(
-            f"invalid timezone {cfg['timezone']!r} ({exc}); on Windows ensure the "
+            f"invalid timezone {tz_name!r} ({exc}); on Windows ensure the "
             "'tzdata' package is installed"
         ) from exc
 
@@ -249,7 +254,7 @@ def run_dry(cfg: dict) -> list[Reading]:
     """Parse the current logs once and return the readings that WOULD be posted,
     printing a summary. No spool, no offset commit, no network — for validating a
     host's parser + log-path config BEFORE going live (`daemon.py --dry-run`)."""
-    tz = ZoneInfo(cfg["timezone"])
+    tz = ZoneInfo(cfg.get("timezone", DEFAULT_TIMEZONE))
     globs = cfg.get("log_globs") or [cfg["log_glob"]]
     parser = load_parser(cfg["parser"])
     # Empty, throwaway offset state (os.devnull reads as {}), so every current
@@ -268,7 +273,8 @@ def run_dry(cfg: dict) -> list[Reading]:
 
 def _print_dry_run_summary(cfg: dict, globs: list[str], readings: list[Reading]) -> None:
     files = sorted({p for pattern in globs for p in glob.glob(pattern)})
-    print(f"DRY RUN — fridge={cfg['fridge']} parser={cfg['parser']} tz={cfg['timezone']}")
+    tz_name = cfg.get("timezone", DEFAULT_TIMEZONE)
+    print(f"DRY RUN — fridge={cfg['fridge']} parser={cfg['parser']} tz={tz_name}")
     print(f"log_globs: {globs}")
     print(f"matched {len(files)} file(s):")
     for path in files[:20]:
@@ -309,7 +315,8 @@ def main() -> None:
         return
     validate_config(cfg, require_network=True)
     fridge = cfg["fridge"]
-    tz = ZoneInfo(cfg["timezone"])
+    tz_name = cfg.get("timezone", DEFAULT_TIMEZONE)
+    tz = ZoneInfo(tz_name)
     poll_interval = cfg.get("poll_interval", 60)
     globs = cfg.get("log_globs") or [cfg["log_glob"]]
     retain_days = cfg.get("spool_retain_days", 7)
@@ -317,6 +324,8 @@ def main() -> None:
     parser = load_parser(cfg["parser"])
     spool = Spool(cfg.get("spool_path", "spool.sqlite"))
     tailer = LogTailer(globs, cfg.get("offset_state_path", "offsets.json"))
+    log.info("daemon starting: fridge=%s tz=%s poll=%ss globs=%s -> %s",
+             fridge, tz_name, poll_interval, globs, cfg["server_url"])
 
     def post(rows: list[dict]) -> bool:
         return post_batch(cfg["server_url"], cfg["token"], fridge, rows)
