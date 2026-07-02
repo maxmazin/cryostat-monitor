@@ -15,7 +15,11 @@ log_globs = [
 poll_interval     = 60                              # seconds (BlueFors logs ~1/min)
 server_url        = "https://labmanager.<tailnet>.ts.net/ingest"
 token             = "<per-host bearer token>"       # unique per host
-timezone          = "America/Los_Angeles"           # confirm per fridge
+# Timezone the logger writes wall-clock timestamps in. RECOMMENDED: set the host
+# clock to UTC and put "UTC" here. A DST-observing zone loses ~1 h of data once a
+# year at the autumn fall-back — the repeated local hour maps to the same UTC
+# timestamps and collides on the (channel, ts) key. Confirm per fridge.
+timezone          = "America/Los_Angeles"
 spool_path        = "spool.sqlite"
 offset_state_path = "offsets.json"                  # tailer's per-file offsets
 spool_retain_days = 7                               # prune acked rows older than this

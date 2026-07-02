@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from daemon import LogTailer, load_parser, run_cycle, to_utc
+from daemon import ConfigError, LogTailer, load_parser, run_cycle, to_utc, validate_config
 from parsers.blackfridge import BlackfridgeParser
 from parsers.whitefridge import WhitefridgeParser
 from spool import Spool
@@ -168,6 +168,58 @@ def test_dry_run_parses_without_persisting(tmp_path, capsys):
     assert not (tmp_path / "offsets.json").exists()   # nothing persisted
     out = capsys.readouterr().out
     assert "DRY RUN" in out and "MXC" in out
+
+
+def test_failed_append_re_reads_next_cycle(tmp_path):
+    # Robustness: a spool failure mid-cycle must not skip the batch. After the
+    # in-memory offset rollback, the next cycle re-reads the same lines.
+    f, tailer, spool = _setup(tmp_path)
+    parser = BlackfridgeParser()
+    _append_bytes(f, _ch6_line(0) + _ch6_line(1))
+
+    class BoomSpool:
+        def append(self, readings):
+            raise RuntimeError("disk full")
+
+    with pytest.raises(RuntimeError):
+        run_cycle(tailer, parser, BoomSpool(), UTC, lambda rows: True)
+
+    sent: list[dict] = []
+    ok = lambda rows: (sent.extend(rows), True)[1]
+    run_cycle(tailer, parser, spool, UTC, ok)   # same tailer: must re-read
+    assert len(sent) == 2
+
+
+# --------------------------------------------------------------------------- config validation
+def _valid_cfg(**over):
+    cfg = {"fridge": "whitefridge", "parser": "whitefridge", "timezone": "UTC",
+           "server_url": "https://x/ingest", "token": "t", "log_globs": ["x"]}
+    cfg.update(over)
+    return cfg
+
+
+def test_validate_config_accepts_valid():
+    validate_config(_valid_cfg(), require_network=True)   # no raise
+
+
+def test_validate_config_requires_network_keys_only_when_asked():
+    cfg = _valid_cfg()
+    del cfg["server_url"], cfg["token"]
+    validate_config(cfg, require_network=False)            # ok for --dry-run
+    with pytest.raises(ConfigError):
+        validate_config(cfg, require_network=True)
+
+
+def test_validate_config_requires_log_globs():
+    cfg = _valid_cfg()
+    del cfg["log_globs"]
+    with pytest.raises(ConfigError):
+        validate_config(cfg, require_network=True)
+
+
+def test_validate_config_rejects_bad_timezone():
+    with pytest.raises(ConfigError):
+        validate_config(_valid_cfg(timezone="Not/AZone"), require_network=True)
 
 
 def test_load_parser_returns_instance():

@@ -44,9 +44,36 @@ from spool import Spool
 log = logging.getLogger("cryo.daemon")
 
 
+class ConfigError(Exception):
+    """A config file is missing a required key or has an invalid value. Raised at
+    startup so a typo fails loud (visible to the service manager) instead of
+    silently wedging the daemon — a fridge that never posts is an invisible
+    outage."""
+
+
 def load_config(path: str) -> dict:
     with open(path, "rb") as fh:
         return tomllib.load(fh)
+
+
+def validate_config(cfg: dict, *, require_network: bool) -> None:
+    """Fail fast on a missing/invalid config. `require_network` adds the keys the
+    live daemon needs to POST (server_url, token); a --dry-run doesn't need them."""
+    required = ["fridge", "parser", "timezone"]
+    if require_network:
+        required += ["server_url", "token"]
+    missing = [k for k in required if not cfg.get(k)]
+    if missing:
+        raise ConfigError(f"config missing required key(s): {', '.join(missing)}")
+    if not (cfg.get("log_globs") or cfg.get("log_glob")):
+        raise ConfigError("config must set 'log_globs' (or 'log_glob')")
+    try:
+        ZoneInfo(cfg["timezone"])
+    except Exception as exc:
+        raise ConfigError(
+            f"invalid timezone {cfg['timezone']!r} ({exc}); on Windows ensure the "
+            "'tzdata' package is installed"
+        ) from exc
 
 
 def load_parser(name: str) -> Parser:
@@ -119,6 +146,12 @@ class LogTailer:
         lose them permanently."""
         self._save_state()
 
+    def rollback(self) -> None:
+        """Discard in-memory offset advances not yet commit()ed. Call after a
+        failed cycle so the next cycle re-reads the uncommitted lines instead of
+        skipping them until a restart reloads the persisted state."""
+        self.state = self._load_state()
+
     @staticmethod
     def _signature(st: os.stat_result) -> str:
         """Identity token for rotation detection. st_ino uniquely identifies a
@@ -189,11 +222,18 @@ def run_cycle(tailer: LogTailer, parser: Parser, spool: Spool, tz: ZoneInfo,
     """One poll cycle. `post(rows) -> bool` is injected so it can be faked in
     tests. Returns the number of readings parsed this cycle."""
     readings: list[Reading] = []
-    for source, lines in tailer.read_new_lines():
-        for r in parser.parse_new(source, lines):
-            r.ts = to_utc(r.ts, tz)
-            readings.append(r)
-    spool.append(readings)
+    try:
+        for source, lines in tailer.read_new_lines():
+            for r in parser.parse_new(source, lines):
+                r.ts = to_utc(r.ts, tz)
+                readings.append(r)
+        spool.append(readings)
+    except Exception:
+        # read_new_lines() already advanced the in-memory offsets; a failure
+        # before the spool is durable must roll them back so the next cycle
+        # re-reads these lines rather than skipping them until a restart.
+        tailer.rollback()
+        raise
     # Advance the persisted read cursor only now that the readings are durably
     # spooled — see LogTailer.commit(). A crash before this re-reads the lines
     # next start and the spool dedups them; a crash after loses nothing.
@@ -264,8 +304,10 @@ def main() -> None:
 
     cfg = load_config(args.config)
     if args.dry_run:
+        validate_config(cfg, require_network=False)
         run_dry(cfg)
         return
+    validate_config(cfg, require_network=True)
     fridge = cfg["fridge"]
     tz = ZoneInfo(cfg["timezone"])
     poll_interval = cfg.get("poll_interval", 60)
@@ -290,4 +332,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except ConfigError as exc:
+        log.error("configuration error: %s", exc)
+        raise SystemExit(2)
