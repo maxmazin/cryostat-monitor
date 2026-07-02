@@ -140,6 +140,50 @@ def test_resets_offset_on_inode_change(tmp_path):
     assert len(out[0][1]) == 1          # new inode -> read from 0
 
 
+def _age(path, days: float) -> None:
+    import os
+    import time
+    t = time.time() - days * 86400
+    os.utime(path, (t, t))
+
+
+def test_skips_years_of_backlog_by_default(tmp_path):
+    # A years-old dated file is skipped as backlog; the current day's file ships.
+    state = str(tmp_path / "state.json")
+    old = tmp_path / "CH6 T 20-01-01.log"
+    new = tmp_path / "CH6 T 26-06-30.log"
+    _append_bytes(old, _ch6_line(0))
+    _append_bytes(new, _ch6_line(1))
+    _age(old, 400)
+    tailer = LogTailer([str(tmp_path / "CH6 T *.log")], state)   # backfill off (default)
+    out = dict(tailer.read_new_lines())
+    assert "CH6 T 26-06-30.log" in out
+    assert "CH6 T 20-01-01.log" not in out
+    assert str(old) not in tailer.state          # old backlog never enters state
+
+
+def test_backfill_true_reads_old_files(tmp_path):
+    state = str(tmp_path / "state.json")
+    old = tmp_path / "CH6 T 20-01-01.log"
+    _append_bytes(old, _ch6_line(0))
+    _age(old, 400)
+    tailer = LogTailer([str(tmp_path / "CH6 T *.log")], state, backfill=True)
+    out = dict(tailer.read_new_lines())
+    assert "CH6 T 20-01-01.log" in out           # full-history mode reads it
+
+
+def test_prunes_state_for_files_aged_out_of_window(tmp_path):
+    state = str(tmp_path / "state.json")
+    f = tmp_path / "CH6 T 26-06-30.log"
+    _append_bytes(f, _ch6_line(0))
+    tailer = LogTailer([str(tmp_path / "CH6 T *.log")], state)
+    tailer.read_new_lines()
+    assert str(f) in tailer.state
+    _age(f, 10)                                   # older than the 2-day window
+    tailer.read_new_lines()
+    assert str(f) not in tailer.state             # offsets.json stays bounded
+
+
 # --------------------------------------------------------------------------- helpers
 def test_to_utc_localizes_naive_timestamp():
     from datetime import datetime

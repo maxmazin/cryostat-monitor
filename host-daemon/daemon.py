@@ -47,6 +47,11 @@ log = logging.getLogger("cryo.daemon")
 # have to set it; still overridable per config for a fridge elsewhere.
 DEFAULT_TIMEZONE = "America/Los_Angeles"
 
+# A newly-seen log file not modified within this many days is treated as historical
+# backlog and skipped (unless backfill is on) — see LogTailer. Also the window a
+# short outage can catch up over.
+DEFAULT_BACKFILL_WINDOW_DAYS = 2
+
 
 class ConfigError(Exception):
     """A config file is missing a required key or has an invalid value. Raised at
@@ -107,11 +112,21 @@ class LogTailer:
     whatever was appended while the daemon was down. A newly-seen file is read
     from the start; an in-place rotation (same path, new file signature — see
     _signature) or a truncation resets the offset to 0.
+
+    On a log tree with years of dated folders, reading all of it on first start
+    would blow up memory and flood the server, so by default a newly-seen file not
+    modified within `backfill_window_days` is skipped as historical backlog (the
+    current day's file is recent, so live data flows immediately; a short outage
+    still catches up over the window). Set backfill=True to ingest the whole
+    history. Offsets for old/gone files are pruned so the state stays bounded.
     """
 
-    def __init__(self, globs: list[str], state_path: str) -> None:
+    def __init__(self, globs: list[str], state_path: str, *, backfill: bool = False,
+                 backfill_window_days: float = DEFAULT_BACKFILL_WINDOW_DAYS) -> None:
         self.globs = globs
         self.state_path = state_path
+        self.backfill = backfill
+        self.window_seconds = backfill_window_days * 86400
         self.state: dict[str, dict] = self._load_state()
 
     def _load_state(self) -> dict[str, dict]:
@@ -133,16 +148,37 @@ class LogTailer:
         durably spooled, so a crash in between re-reads them (the spool dedups)
         rather than losing them (§3.2)."""
         results: list[tuple[str, list[str]]] = []
+        now = time.time()
         paths = sorted({p for pattern in self.globs for p in glob.glob(pattern)})
         for path in paths:
             try:
-                lines = self._read_file(path)
+                lines = self._read_file(path, now)
             except OSError:
                 # File vanished or unreadable mid-poll; try again next cycle.
                 continue
             if lines:
                 results.append((os.path.basename(path), lines))
+        self._prune_state(paths, now)
         return results
+
+    def _prune_state(self, current_paths: list[str], now: float) -> None:
+        """Bound offsets.json on a years-deep tree: drop entries for files that are
+        gone, or (outside full-backfill mode) not modified within the window. A
+        dropped old file re-encountered later is skipped by mtime, so pruning never
+        causes a re-read. In backfill mode nothing is pruned — dropping an entry
+        there would re-ship the whole file."""
+        if self.backfill:
+            return
+        current = set(current_paths)
+        for path in list(self.state):
+            if path not in current:
+                del self.state[path]
+                continue
+            try:
+                if (now - os.stat(path).st_mtime) > self.window_seconds:
+                    del self.state[path]
+            except OSError:
+                del self.state[path]
 
     def commit(self) -> None:
         """Persist the advanced read offsets. Call this only AFTER the lines from
@@ -172,12 +208,20 @@ class LogTailer:
             return f"ino:{st.st_ino}"
         return f"ctime:{st.st_ctime_ns}"
 
-    def _read_file(self, path: str) -> list[str]:
+    def _read_file(self, path: str, now: float) -> list[str]:
         st = os.stat(path)
         sig = self._signature(st)
         prev = self.state.get(path)
-        if prev is None or prev.get("sig") != sig or st.st_size < prev.get("offset", 0):
-            offset = 0   # new file, rotated-in-place, or truncated
+        if prev is None:
+            # Not yet tracked. Skip a historical-backlog file (unless full backfill
+            # is on): reading years of dated folders on first start would exhaust
+            # memory and flood the server. The current day's file is recent, so it
+            # is picked up and live data flows immediately.
+            if not self.backfill and (now - st.st_mtime) > self.window_seconds:
+                return []
+            offset = 0
+        elif prev.get("sig") != sig or st.st_size < prev.get("offset", 0):
+            offset = 0   # rotated-in-place, or truncated
         else:
             offset = prev["offset"]
 
@@ -257,31 +301,38 @@ def run_dry(cfg: dict) -> list[Reading]:
     tz = ZoneInfo(cfg.get("timezone", DEFAULT_TIMEZONE))
     globs = cfg.get("log_globs") or [cfg["log_glob"]]
     parser = load_parser(cfg["parser"])
-    # Empty, throwaway offset state (os.devnull reads as {}), so every current
-    # file is read from the start and nothing is ever persisted — commit() is
-    # never called, so the null path is never written.
-    tailer = LogTailer(globs, os.devnull)
+    matched = sorted({p for pattern in globs for p in glob.glob(pattern)})
+    # Validate against only the most recent dated folder — enough to confirm the
+    # parser + path + timezone, and safe when the tree holds years of history.
+    sampled: list[str] = []
+    if matched:
+        newest_dir = max({os.path.dirname(p) for p in matched}, key=os.path.getmtime)
+        sampled = [p for p in matched if os.path.dirname(p) == newest_dir]
 
     readings: list[Reading] = []
-    for source, lines in tailer.read_new_lines():
-        for r in parser.parse_new(source, lines):
+    for path in sampled:
+        try:
+            with open(path, "rb") as fh:
+                data = fh.read()
+        except OSError:
+            continue
+        lines = data.decode("ascii", errors="replace").splitlines()
+        for r in parser.parse_new(os.path.basename(path), lines):
             r.ts = to_utc(r.ts, tz)
             readings.append(r)
-    _print_dry_run_summary(cfg, globs, readings)
+    _print_dry_run_summary(cfg, matched, sampled, readings)
     return readings
 
 
-def _print_dry_run_summary(cfg: dict, globs: list[str], readings: list[Reading]) -> None:
-    files = sorted({p for pattern in globs for p in glob.glob(pattern)})
+def _print_dry_run_summary(cfg: dict, matched: list[str], sampled: list[str],
+                           readings: list[Reading]) -> None:
     tz_name = cfg.get("timezone", DEFAULT_TIMEZONE)
     print(f"DRY RUN — fridge={cfg['fridge']} parser={cfg['parser']} tz={tz_name}")
-    print(f"log_globs: {globs}")
-    print(f"matched {len(files)} file(s):")
-    for path in files[:20]:
+    print(f"matched {len(matched)} file(s) across the tree; "
+          f"validating the most recent day ({len(sampled)} file(s)):")
+    for path in sampled:
         print(f"  {path}")
-    if len(files) > 20:
-        print(f"  ... (+{len(files) - 20} more)")
-    print(f"parsed {len(readings)} reading(s) that WOULD be posted")
+    print(f"parsed {len(readings)} reading(s) from that day that WOULD be posted")
     if not readings:
         print("NO READINGS — check log_globs path/pattern and that the logger is writing.")
         return
@@ -321,11 +372,14 @@ def main() -> None:
     globs = cfg.get("log_globs") or [cfg["log_glob"]]
     retain_days = cfg.get("spool_retain_days", 7)
 
+    backfill = cfg.get("backfill", False)
+    window_days = cfg.get("backfill_window_days", DEFAULT_BACKFILL_WINDOW_DAYS)
     parser = load_parser(cfg["parser"])
     spool = Spool(cfg.get("spool_path", "spool.sqlite"))
-    tailer = LogTailer(globs, cfg.get("offset_state_path", "offsets.json"))
-    log.info("daemon starting: fridge=%s tz=%s poll=%ss globs=%s -> %s",
-             fridge, tz_name, poll_interval, globs, cfg["server_url"])
+    tailer = LogTailer(globs, cfg.get("offset_state_path", "offsets.json"),
+                       backfill=backfill, backfill_window_days=window_days)
+    log.info("daemon starting: fridge=%s tz=%s poll=%ss backfill=%s(window=%sd) globs=%s -> %s",
+             fridge, tz_name, poll_interval, backfill, window_days, globs, cfg["server_url"])
 
     def post(rows: list[dict]) -> bool:
         return post_batch(cfg["server_url"], cfg["token"], fridge, rows)

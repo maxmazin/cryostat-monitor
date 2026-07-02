@@ -23,3 +23,12 @@ timezone          = "America/Los_Angeles"
 spool_path        = "spool.sqlite"
 offset_state_path = "offsets.json"                  # tailer's per-file offsets
 spool_retain_days = 7                               # prune acked rows older than this
+
+# First-run backfill. A BlueFors tree can hold YEARS of dated folders; by default
+# the daemon skips that history and ships only data written from deployment onward
+# (plus the current day), so first start doesn't slurp years into memory or flood
+# the server. A newly-seen file modified within backfill_window_days is still
+# picked up, which also lets a short outage catch up. Set backfill=true to send the
+# entire history instead.
+backfill             = false
+backfill_window_days = 2
