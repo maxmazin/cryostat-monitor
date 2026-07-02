@@ -1,5 +1,10 @@
 # Deployment & reachability — closing Phase 0 on labmanager
 
+> **Running the server on a Windows 10 host?** Do it under WSL2 (Ubuntu 24.04):
+> see [`deployment-wsl.md`](./deployment-wsl.md), which wraps §1–§4 below with the
+> WSL-specific setup (systemd, networking into the VM, boot autostart). The steps
+> here apply verbatim inside the WSL shell.
+
 Phase 0's acceptance criterion is: *a `curl` POST of one fake reading **from a
 fridge host** lands a row in `readings`.* So far that path is proven only on a
 dev Mac. This runbook stands the ingest service up on **labmanager** (Ubuntu

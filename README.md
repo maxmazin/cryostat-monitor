@@ -148,7 +148,9 @@ What's needed next:
 - [`docs/questions-for-ben.md`](./docs/questions-for-ben.md) — open questions,
   prioritized by what unblocks the most (deploy inputs, then the channel wiring).
 - [`docs/deployment.md`](./docs/deployment.md) — stand the services up on
-  labmanager with TLS and confirm reachability from a fridge host.
+  labmanager with TLS and confirm reachability from a fridge host. On a Windows 10
+  server host, run the stack under WSL2 (Ubuntu 24.04):
+  [`docs/deployment-wsl.md`](./docs/deployment-wsl.md).
 
 See §10 of the spec for the full phased plan and §11 for open questions pending
 from Ben.
