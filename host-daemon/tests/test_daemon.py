@@ -149,6 +149,27 @@ def test_to_utc_localizes_naive_timestamp():
     assert got == datetime(2026, 6, 30, 19, 0, 0, tzinfo=timezone.utc)  # PDT = UTC-7
 
 
+def test_dry_run_parses_without_persisting(tmp_path, capsys):
+    # --dry-run parses the current logs and reports what it WOULD post, without
+    # creating a spool or persisting offsets (so it's safe to run repeatedly on a
+    # live host before going live).
+    from daemon import run_dry
+    f = tmp_path / "CH6 T 26-06-30.log"
+    _append_bytes(f, _ch6_line(0) + _ch6_line(1))
+    cfg = {
+        "fridge": "blackfridge",
+        "parser": "blackfridge",
+        "timezone": "UTC",
+        "log_globs": [str(tmp_path / "CH6 T *.log")],
+    }
+    readings = run_dry(cfg)
+    assert len(readings) == 2
+    assert all(r.channel == "MXC" and r.ts.tzinfo is not None for r in readings)
+    assert not (tmp_path / "offsets.json").exists()   # nothing persisted
+    out = capsys.readouterr().out
+    assert "DRY RUN" in out and "MXC" in out
+
+
 def test_load_parser_returns_instance():
     assert isinstance(load_parser("blackfridge"), BlackfridgeParser)
 

@@ -3,6 +3,11 @@
 Run as a service via NSSM wrapping `python daemon.py --config config.toml`.
 NSSM gives auto-restart, so the daemon itself has a watchdog.
 
+Before going live on a new host, `python daemon.py --config config.toml --dry-run`
+parses the current logs and prints what it WOULD post (per-channel counts, value
+ranges, latest timestamp) without spooling, committing offsets, or contacting the
+server — a safe way to validate the parser + log-path config first.
+
 Every poll_interval seconds:
   1. Read NEW lines from each active log file (LogTailer tracks per-file byte
      offset + inode; handles midnight rotation to a new dated file, partial
@@ -200,13 +205,67 @@ def run_cycle(tailer: LogTailer, parser: Parser, spool: Spool, tz: ZoneInfo,
     return len(readings)
 
 
+def run_dry(cfg: dict) -> list[Reading]:
+    """Parse the current logs once and return the readings that WOULD be posted,
+    printing a summary. No spool, no offset commit, no network — for validating a
+    host's parser + log-path config BEFORE going live (`daemon.py --dry-run`)."""
+    tz = ZoneInfo(cfg["timezone"])
+    globs = cfg.get("log_globs") or [cfg["log_glob"]]
+    parser = load_parser(cfg["parser"])
+    # Empty, throwaway offset state (os.devnull reads as {}), so every current
+    # file is read from the start and nothing is ever persisted — commit() is
+    # never called, so the null path is never written.
+    tailer = LogTailer(globs, os.devnull)
+
+    readings: list[Reading] = []
+    for source, lines in tailer.read_new_lines():
+        for r in parser.parse_new(source, lines):
+            r.ts = to_utc(r.ts, tz)
+            readings.append(r)
+    _print_dry_run_summary(cfg, globs, readings)
+    return readings
+
+
+def _print_dry_run_summary(cfg: dict, globs: list[str], readings: list[Reading]) -> None:
+    files = sorted({p for pattern in globs for p in glob.glob(pattern)})
+    print(f"DRY RUN — fridge={cfg['fridge']} parser={cfg['parser']} tz={cfg['timezone']}")
+    print(f"log_globs: {globs}")
+    print(f"matched {len(files)} file(s):")
+    for path in files[:20]:
+        print(f"  {path}")
+    if len(files) > 20:
+        print(f"  ... (+{len(files) - 20} more)")
+    print(f"parsed {len(readings)} reading(s) that WOULD be posted")
+    if not readings:
+        print("NO READINGS — check log_globs path/pattern and that the logger is writing.")
+        return
+    by_channel: dict[str, list[Reading]] = {}
+    for r in readings:
+        by_channel.setdefault(r.channel, []).append(r)
+    print(f"{'channel':<10}{'count':>7}  {'unit':<5}{'min':>14}{'max':>14}  latest_ts (UTC)")
+    for channel in sorted(by_channel):
+        rows = by_channel[channel]
+        values = [r.value for r in rows]
+        latest = max(r.ts for r in rows)
+        print(f"{channel:<10}{len(rows):>7}  {rows[0].unit:<5}"
+              f"{min(values):>14.6g}{max(values):>14.6g}  {latest.isoformat()}")
+    print("check: expected channels all present? values physically plausible? "
+          "timestamps recent and in UTC?")
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True)
+    ap.add_argument("--dry-run", action="store_true",
+                    help="parse the current logs and print what would be posted, "
+                         "then exit — no spool, no offset commit, no network")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
+    if args.dry_run:
+        run_dry(cfg)
+        return
     fridge = cfg["fridge"]
     tz = ZoneInfo(cfg["timezone"])
     poll_interval = cfg.get("poll_interval", 60)
