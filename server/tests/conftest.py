@@ -40,6 +40,8 @@ def fake_db(monkeypatch):
     monkeypatch.setattr(db, "close_pool", lambda *a, **k: None)
     monkeypatch.setattr(db, "insert_readings", fake.insert_readings)
     monkeypatch.setattr(db, "insert_maintenance", fake.insert_maintenance)
+    # /health pings the DB; default to healthy. Tests re-patch to simulate outage.
+    monkeypatch.setattr(db, "ping", lambda: None)
     return fake
 
 

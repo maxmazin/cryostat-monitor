@@ -22,8 +22,9 @@ CREATE INDEX IF NOT EXISTS idx_readings_fridge_ts ON readings (fridge, ts DESC);
 
 -- Fast "latest value per fridge" without scanning history.
 --   last_ts     = max DATA timestamp (host clock, converted to UTC) — shown to humans.
---   received_at = server clock when data last arrived — the staleness basis, so
---                 a skewed fridge-host clock cannot mask real silence (§3.1, §12).
+--   received_at = server clock when NEW data last arrived (all-duplicate replays
+--                 don't count) — the staleness basis, so a skewed fridge-host
+--                 clock cannot mask real silence (§3.1, §12).
 CREATE TABLE IF NOT EXISTS last_seen (
     fridge      text PRIMARY KEY,
     last_ts     timestamptz NOT NULL,

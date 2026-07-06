@@ -62,11 +62,34 @@ def _latest_seen(fridge: str) -> datetime:
     return row[0]
 
 
+def _received_at(fridge: str) -> datetime:
+    with db._get_pool().connection() as conn:
+        row = conn.execute(
+            "SELECT received_at FROM last_seen WHERE fridge = %s", (fridge,)
+        ).fetchone()
+    return row[0]
+
+
 def test_insert_is_idempotent(fridge):
     ts = datetime(2026, 1, 1, tzinfo=timezone.utc)
     rows = [(ts, fridge, "MXC", 0.0102, "K")]
     assert db.insert_readings(fridge, rows) == 1   # first insert lands
+    received_first = _received_at(fridge)
     assert db.insert_readings(fridge, rows) == 0   # ON CONFLICT DO NOTHING
+    # An all-duplicate replay inserts nothing, so it must NOT refresh the
+    # staleness clock: a daemon replaying old batches would otherwise mask
+    # true fridge silence from the watchdog forever.
+    assert _received_at(fridge) == received_first
+
+
+def test_replayed_batch_does_not_advance_received_at_but_new_data_does(fridge):
+    t1 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    db.insert_readings(fridge, [(t1, fridge, "MXC", 0.01, "K")])
+    received_first = _received_at(fridge)
+    # New row (different ts) -> genuinely new data -> received_at advances.
+    t2 = t1 + timedelta(seconds=30)
+    db.insert_readings(fridge, [(t2, fridge, "MXC", 0.011, "K")])
+    assert _received_at(fridge) >= received_first
 
 
 def test_last_seen_advances_to_batch_max(fridge):

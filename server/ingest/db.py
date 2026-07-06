@@ -31,6 +31,16 @@ def _get_pool() -> ConnectionPool:
     return _db.get()
 
 
+def ping() -> None:
+    """Prove a database round-trip (used by /health). Raises on any failure.
+
+    Short acquisition timeout so a down/misconfigured Postgres turns into a
+    fast 503, not a hung health probe.
+    """
+    with _get_pool().connection(timeout=5) as conn:
+        conn.execute("SELECT 1")
+
+
 # Bulk insert is idempotent: re-sent rows after an outage are dropped by the
 # primary key (fridge, channel, ts). Never rely on the host to know what was
 # already accepted (§3.2).
@@ -41,9 +51,12 @@ _INSERT_SQL = """
 """
 
 # Keep last_ts at the max data timestamp ever received (GREATEST guards against
-# out-of-order/backfill batches lowering it). received_at always advances to the
-# server clock: it records when we last HEARD from the host, which is what the
-# watchdog measures staleness against (immune to fridge-host clock skew).
+# out-of-order/backfill batches lowering it). received_at advances to the server
+# clock, but only when the batch inserted genuinely NEW rows (see
+# insert_readings): it is what the watchdog measures staleness against (immune
+# to fridge-host clock skew), and a daemon bug replaying already-stored batches
+# must not keep bumping it and mask true fridge silence — SILENT means "no NEW
+# data".
 _LAST_SEEN_SQL = """
     INSERT INTO last_seen (fridge, last_ts, received_at)
     VALUES (%s, %s, now())
@@ -56,8 +69,9 @@ _LAST_SEEN_SQL = """
 def insert_readings(
     fridge: str, rows: list[tuple[datetime, str, str, float, str]]
 ) -> int:
-    """Bulk-insert readings and advance last_seen. Returns rows actually inserted
-    (excludes ON CONFLICT duplicates). `rows` are (ts_utc, fridge, channel, value, unit).
+    """Bulk-insert readings and advance last_seen when new rows landed. Returns
+    rows actually inserted (excludes ON CONFLICT duplicates). `rows` are
+    (ts_utc, fridge, channel, value, unit).
     """
     if not rows:
         return 0
@@ -69,7 +83,11 @@ def insert_readings(
             # executemany rowcount is unreliable across drivers for affected
             # rows; report attempted count and let the PK enforce idempotency.
             inserted = cur.rowcount if cur.rowcount is not None and cur.rowcount >= 0 else len(rows)
-            cur.execute(_LAST_SEEN_SQL, (fridge, max_ts))
+            # Advance last_seen only for genuinely new data: an all-duplicate
+            # replay must not refresh the staleness clock (see _LAST_SEEN_SQL
+            # comment). The len(rows) fallback above errs toward advancing.
+            if inserted > 0:
+                cur.execute(_LAST_SEEN_SQL, (fridge, max_ts))
     return inserted
 
 

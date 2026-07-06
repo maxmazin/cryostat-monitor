@@ -26,7 +26,16 @@ class DbPool:
         if self._pool is not None:
             raise RuntimeError("connection pool already open; call close() first")
         dsn = dsn or os.environ["CRYO_DB_DSN"]
-        self._pool = ConnectionPool(dsn, min_size=1, max_size=max_size, open=True)
+        # check= revalidates a connection before handing it out, so a Postgres
+        # restart doesn't serve ~max_size dead connections (OperationalError)
+        # before the pool heals.
+        self._pool = ConnectionPool(
+            dsn,
+            min_size=1,
+            max_size=max_size,
+            open=True,
+            check=ConnectionPool.check_connection,
+        )
         return self._pool
 
     def close(self) -> None:

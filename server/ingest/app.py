@@ -21,10 +21,13 @@ import json
 import logging
 import math
 import os
+import secrets
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from typing import Iterable
 
 from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
 from . import db
@@ -93,11 +96,25 @@ app = FastAPI(title="cryostat-monitor ingest", lifespan=lifespan)
 
 
 # --------------------------------------------------------------------------- models
+# The daemon drains at most 10,000 spool rows per POST (host-daemon/spool.py,
+# unacked(limit=10000)) — that is the contract. A larger batch is a client bug,
+# not a bigger backlog, so it is rejected with 413 rather than buffered.
+MAX_BATCH_READINGS = 10_000
+
+# Timestamp plausibility window. A reading far in the future (broken host
+# clock, seconds-vs-milliseconds epoch bug) would permanently wedge
+# last_seen.last_ts via GREATEST and freeze the watchdog's ORDER BY ts DESC
+# view. Such readings are DROPPED, not rejected: a 4xx would poison the
+# daemon's retry loop over one bad row.
+TS_FLOOR = datetime(2020, 1, 1, tzinfo=timezone.utc)
+TS_MAX_FUTURE_SKEW = timedelta(hours=24)
+
+
 class Reading(BaseModel):
     ts: datetime
-    channel: str
+    channel: str = Field(max_length=64)
     value: float
-    unit: str
+    unit: str = Field(max_length=16)
 
     @field_validator("ts")
     @classmethod
@@ -111,7 +128,7 @@ class Reading(BaseModel):
 
 
 class IngestBody(BaseModel):
-    fridge: str
+    fridge: str = Field(max_length=64)
     readings: list[Reading]
 
 
@@ -131,12 +148,26 @@ def _bearer(authorization: str | None) -> str:
     return token
 
 
+def _match_token(presented: str, known: Iterable[str]) -> str | None:
+    """Constant-time token lookup: compare against EVERY known token with
+    secrets.compare_digest (a dict lookup short-circuits and leaks timing).
+    There are ~5 tokens, so the full scan is negligible. Encoded to bytes
+    because compare_digest on str rejects non-ASCII input."""
+    presented_bytes = presented.encode()
+    matched: str | None = None
+    for candidate in known:
+        if secrets.compare_digest(presented_bytes, candidate.encode()):
+            matched = candidate
+    return matched
+
+
 def fridge_for_token(authorization: str | None = Header(default=None)) -> str:
     """Resolve a per-host Bearer token to its fridge, or 401."""
     token = _bearer(authorization)
-    if token not in TOKENS:
+    matched = _match_token(token, TOKENS)
+    if matched is None:
         raise HTTPException(status_code=401, detail="invalid token")
-    return TOKENS[token]
+    return TOKENS[matched]
 
 
 def require_maintenance_auth(authorization: str | None = Header(default=None)) -> None:
@@ -144,13 +175,26 @@ def require_maintenance_auth(authorization: str | None = Header(default=None)) -
     if not MAINTENANCE_TOKENS:
         raise HTTPException(status_code=503, detail="maintenance endpoint not configured")
     token = _bearer(authorization)
-    if token not in MAINTENANCE_TOKENS:
+    if _match_token(token, MAINTENANCE_TOKENS) is None:
         raise HTTPException(status_code=401, detail="invalid maintenance token")
 
 
 # --------------------------------------------------------------------------- endpoints
-@app.get("/health")
-def health() -> dict:
+# response_model=None: the union return type (dict | JSONResponse) is not a
+# valid response-model annotation for FastAPI.
+@app.get("/health", response_model=None)
+def health() -> dict | JSONResponse:
+    # The pool opens non-blocking, so startup "succeeds" even with a bad DSN.
+    # /health must prove a real DB round-trip, or every /ingest 500s while the
+    # monitoring stack reports green and all five fridges drift into SILENT.
+    try:
+        db.ping()
+    except Exception:
+        log.exception("health check failed: database unreachable")
+        return JSONResponse(
+            status_code=503,
+            content={"status": "degraded", "detail": "database unreachable"},
+        )
     return {"status": "ok"}
 
 
@@ -160,21 +204,51 @@ def ingest(body: IngestBody, fridge: str = Depends(fridge_for_token)) -> dict:
     if body.fridge != fridge:
         raise HTTPException(status_code=403, detail="fridge does not match token")
 
+    if len(body.readings) > MAX_BATCH_READINGS:
+        # 413 (not a generic 422) so a client author knows the fix is to chunk,
+        # matching the daemon's 10,000-row spool drain per POST.
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"batch has {len(body.readings)} readings; the maximum is "
+                f"{MAX_BATCH_READINGS} per POST — split into smaller batches"
+            ),
+        )
+
     # Drop non-finite values (NaN/Inf from a flaky sensor) rather than storing
     # them: stored NaN silently evades the watchdog's threshold checks (§8), and
     # rejecting the whole batch would wedge the host's spool over one bad row.
-    # ts is validated tz-aware on the model; normalize to UTC before storing (§3.6).
+    # Implausible timestamps (outside TS_FLOOR..now+TS_MAX_FUTURE_SKEW) are
+    # dropped for the same reason. ts is validated tz-aware on the model;
+    # normalize to UTC before storing (§3.6).
     rows = []
-    dropped = 0
+    dropped_nonfinite = 0
+    dropped_ts = 0
+    first_bad_ts: tuple[str, str] | None = None
+    ts_ceiling = datetime.now(timezone.utc) + TS_MAX_FUTURE_SKEW
     for r in body.readings:
         if not math.isfinite(r.value):
-            dropped += 1
+            dropped_nonfinite += 1
             continue
-        rows.append((r.ts.astimezone(timezone.utc), body.fridge, r.channel, r.value, r.unit))
+        ts_utc = r.ts.astimezone(timezone.utc)
+        if not (TS_FLOOR <= ts_utc <= ts_ceiling):
+            dropped_ts += 1
+            if first_bad_ts is None:
+                first_bad_ts = (ts_utc.isoformat(), r.channel)
+            continue
+        rows.append((ts_utc, body.fridge, r.channel, r.value, r.unit))
 
-    if dropped:
-        log.warning("ingest %s: dropped %d non-finite reading(s)", body.fridge, dropped)
+    if dropped_nonfinite:
+        log.warning("ingest %s: dropped %d non-finite reading(s)", body.fridge, dropped_nonfinite)
+    if dropped_ts:
+        # One aggregated line per batch: a host with a broken clock would
+        # otherwise emit a warning per reading, 10k lines per POST.
+        log.warning(
+            "ingest %s: dropped %d reading(s) with implausible ts (first: %s channel=%s)",
+            body.fridge, dropped_ts, first_bad_ts[0], first_bad_ts[1],
+        )
 
+    dropped = dropped_nonfinite + dropped_ts
     inserted = db.insert_readings(body.fridge, rows)
     return {"received": len(body.readings), "inserted": inserted, "dropped": dropped}
 

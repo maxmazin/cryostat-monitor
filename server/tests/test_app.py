@@ -1,11 +1,16 @@
 """Unit tests for the ingest service endpoints (DB layer faked).
 
-Covers auth, the timezone contract (§3.6), non-finite filtering (§8), and the
+Covers auth, the timezone contract (§3.6), non-finite filtering (§8), batch
+and string caps, timestamp plausibility, health degradation, and the
 maintenance endpoint's auth/validation/cap/fail-closed behavior (§2.1, §7).
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+from ingest import db
 
 HOST_AUTH = {"Authorization": "Bearer host-token"}
 MAINT_AUTH = {"Authorization": "Bearer maint-token"}
@@ -18,6 +23,16 @@ def _reading(ts="2026-06-29T19:00:00Z", channel="MXC", value=0.0102, unit="K"):
 # --------------------------------------------------------------------------- health
 def test_health_ok(client):
     assert client.get("/health").json() == {"status": "ok"}
+
+
+def test_health_returns_503_degraded_when_db_unreachable(client, monkeypatch):
+    def _boom() -> None:
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(db, "ping", _boom)
+    r = client.get("/health")
+    assert r.status_code == 503
+    assert r.json()["status"] == "degraded"
 
 
 # --------------------------------------------------------------------------- ingest auth
@@ -104,6 +119,78 @@ def test_ingest_drops_infinity_value(client, fake_db):
     assert r.json() == {"received": 1, "inserted": 0, "dropped": 1}
     _, rows = fake_db.readings_calls[0]
     assert rows == []
+
+
+# --------------------------------------------------------------------------- ingest caps
+def test_ingest_rejects_batch_over_cap_returns_413(client, fake_db):
+    # 10,001 readings: one over the daemon's spool-drain contract. List of one
+    # shared dict — cheap to build and serialize.
+    readings = [_reading()] * 10_001
+    r = client.post("/ingest", headers=HOST_AUTH,
+                    json={"fridge": "blackfridge", "readings": readings})
+    assert r.status_code == 413
+    assert "10000" in r.json()["detail"]  # detail names the cap so clients chunk
+    assert fake_db.readings_calls == []
+
+
+def test_ingest_accepts_batch_at_cap(client, fake_db):
+    readings = [_reading()] * 10_000
+    r = client.post("/ingest", headers=HOST_AUTH,
+                    json={"fridge": "blackfridge", "readings": readings})
+    assert r.status_code == 200
+    assert r.json() == {"received": 10_000, "inserted": 10_000, "dropped": 0}
+
+
+@pytest.mark.parametrize("field,value", [
+    ("channel", "c" * 65),   # cap 64
+    ("unit", "u" * 17),      # cap 16
+])
+def test_ingest_rejects_oversized_reading_string_422(client, fake_db, field, value):
+    r = client.post("/ingest", headers=HOST_AUTH,
+                    json={"fridge": "blackfridge", "readings": [_reading(**{field: value})]})
+    assert r.status_code == 422
+    assert fake_db.readings_calls == []
+
+
+def test_ingest_rejects_oversized_fridge_name_422(client, fake_db):
+    r = client.post("/ingest", headers=HOST_AUTH,
+                    json={"fridge": "f" * 65, "readings": [_reading()]})
+    assert r.status_code == 422
+    assert fake_db.readings_calls == []
+
+
+# --------------------------------------------------------------------------- ingest ts sanity
+def test_ingest_drops_far_future_ts_keeps_rest_of_batch(client, fake_db):
+    # A year-3000 ts (broken host clock) must be dropped — not stored, where it
+    # would wedge last_seen via GREATEST — and not 4xx the whole batch, which
+    # would poison the daemon's retry loop.
+    r = client.post("/ingest", headers=HOST_AUTH, json={
+        "fridge": "blackfridge",
+        "readings": [_reading(ts="3000-01-01T00:00:00Z"),
+                     _reading(channel="4K", value=3.9)],
+    })
+    assert r.status_code == 200
+    assert r.json() == {"received": 2, "inserted": 1, "dropped": 1}
+    _, rows = fake_db.readings_calls[0]
+    assert [row[2] for row in rows] == ["4K"]  # only the sane row reached the DB
+
+
+def test_ingest_drops_pre_2020_ts(client, fake_db):
+    r = client.post("/ingest", headers=HOST_AUTH, json={
+        "fridge": "blackfridge",
+        "readings": [_reading(ts="1970-01-01T00:00:01Z")],
+    })
+    assert r.json() == {"received": 1, "inserted": 0, "dropped": 1}
+    _, rows = fake_db.readings_calls[0]
+    assert rows == []
+
+
+def test_ingest_accepts_slightly_future_ts(client, fake_db):
+    # Ordinary clock skew (< 24 h ahead) must still be accepted.
+    ts = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    r = client.post("/ingest", headers=HOST_AUTH,
+                    json={"fridge": "blackfridge", "readings": [_reading(ts=ts)]})
+    assert r.json() == {"received": 1, "inserted": 1, "dropped": 0}
 
 
 # --------------------------------------------------------------------------- maintenance auth
