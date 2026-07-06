@@ -113,7 +113,9 @@ tailscale serve status      # should show https://labmanager.<tailnet>.ts.net ->
 ```
 
 Only devices on your tailnet can reach it. Nothing is published to the public
-internet.
+internet. In the Tailscale admin console, **disable key expiry** for the server
+node and all five fridge-host nodes — otherwise the data path silently breaks on
+a ~180-day schedule when a node key expires.
 
 ### LAN-only variant — reverse proxy
 
@@ -171,6 +173,12 @@ sudo systemctl enable --now cryo-backup.timer
 sudo systemctl start cryo-backup.service      # take one now to verify
 pg_restore --list /var/backups/cryostat/cryo-*.dump | head   # confirm it's readable
 ```
+
+Create a **second healthchecks.io check** for the backup job and set its URL as
+`BACKUP_PING_URL` in `/etc/cryostat-monitor/backup.env` (the unit's optional
+`EnvironmentFile=`) — the script pings it on success and `$BACKUP_PING_URL/fail`
+on failure, so a silently broken nightly backup pages instead of being discovered
+at restore time.
 
 Point the site's existing **Restic → NAS** job at `/var/backups/cryostat` for
 offsite copies (§10 Phase 4). Restore with `pg_restore -d cryo <dump>`. The raw-data

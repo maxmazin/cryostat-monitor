@@ -11,9 +11,26 @@
 #   CRYO_DB               database name           (default: cryo)
 #   CRYO_BACKUP_DIR       output directory        (default: /var/backups/cryostat)
 #   CRYO_BACKUP_KEEP_DAYS days of dumps to keep    (default: 14)
+#   BACKUP_PING_URL       healthchecks.io check URL for the backup job. If set,
+#                         the script pings it on success and $BACKUP_PING_URL/fail
+#                         on failure, so a silently failing nightly backup pages
+#                         instead of being discovered at restore time. If unset,
+#                         no ping is attempted (keeps the secret out of the repo).
+#                         Set it in /etc/cryostat-monitor/backup.env — the
+#                         cryo-backup.service unit loads that file.
 # Connection uses standard libpq env (PGHOST/PGPORT/PGUSER) or, by default, the
 # local socket as the invoking OS user (peer auth as `cryo` on labmanager).
 set -euo pipefail
+
+# Report the outcome to healthchecks.io if configured. The ping itself must
+# never change the unit's result — a flaky network shouldn't fail a good backup
+# (or mask a bad one behind a curl error), hence `|| true`.
+ping_healthchecks() {
+    local suffix="$1"    # "" on success, "/fail" on failure
+    [[ -n "${BACKUP_PING_URL:-}" ]] || return 0
+    curl -fsS --max-time 10 --retry 3 -o /dev/null "$BACKUP_PING_URL$suffix" || true
+}
+trap '[[ $? -eq 0 ]] || ping_healthchecks /fail' EXIT
 
 DB="${CRYO_DB:-cryo}"
 DIR="${CRYO_BACKUP_DIR:-/var/backups/cryostat}"
@@ -36,3 +53,5 @@ echo "wrote $out"
 if ! find "$DIR" -maxdepth 1 -type f -name 'cryo-*.dump' -mtime "+$KEEP_DAYS" -print -delete; then
     echo "warning: pruning old dumps had errors (the new dump is intact)" >&2
 fi
+
+ping_healthchecks ""

@@ -3,7 +3,10 @@ Description=Run the cryostat-monitor PostgreSQL backup nightly
 
 [Timer]
 OnCalendar=*-*-* 03:30:00
-Persistent=true          # run on next boot if the machine was off at 03:30
+# Run on next boot if the machine was off at 03:30. Keep this comment on its
+# own line: systemd has no inline comments, so trailing text corrupts the value
+# and Persistent silently stays false.
+Persistent=true
 
 [Install]
 WantedBy=timers.target

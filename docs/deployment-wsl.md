@@ -109,6 +109,10 @@ tailscale serve status     # https://<host>.<tailnet>.ts.net -> 127.0.0.1:8000
 The fridge daemon then posts to `https://<host>.<tailnet>.ts.net/ingest`. Tailscale
 provisions a valid cert and the tailnet is WireGuard-encrypted end to end.
 
+In the Tailscale admin console, **disable key expiry** for the server node and all
+five fridge-host nodes — otherwise the data path silently breaks on a ~180-day
+schedule when a node key expires.
+
 **LAN-only alternative (no tailnet):** WSL2 on Windows 10 is NAT'd (mirrored
 networking is Windows 11 only), so you must forward a Windows port into the VM with
 `netsh interface portproxy`. The catch is the WSL IP changes on each boot, so it has
@@ -122,7 +126,13 @@ own — it boots only when something invokes it. Create a Task Scheduler task th
 boots the distro at startup and keeps the VM alive; systemd then starts the enabled
 services.
 
-Task Scheduler → Create Task:
+**Preferred: import the committed task definition** —
+[`scripts/windows/cryostat-wsl-boot-task.xml`](../scripts/windows/cryostat-wsl-boot-task.xml)
+(import command, verification, and failure modes in
+[`scripts/windows/README.md`](../scripts/windows/README.md)). The manual
+equivalent, for reference or if you must hand-create it:
+
+Task Scheduler → Create Task (name it `cryostat-wsl-boot`):
 - **General:** "Run whether user is logged on or not"; check "Run with highest
   privileges"; set the user to the account that installed Ubuntu (the distro is
   registered under that profile — the `SYSTEM` account can't see it).
@@ -142,18 +152,34 @@ serve --bg` config persists, so §4 survives reboots too.
 `Invoke-RestMethod http://localhost:8000/health` and, on the tailnet, hit the
 `.ts.net/health` URL from the fridge host. Both should answer with nobody logged in.
 
+**Re-verify the task after any Windows password change or feature update.** A
+password change invalidates the task's stored credentials (it silently fails with
+result code `0x8007052E` — re-save it); feature updates have been known to drop
+scheduled tasks. Check with `schtasks /query /tn cryostat-wsl-boot /v` and a
+reboot test (see `scripts/windows/README.md`).
+
 ## 6. Backups
 
 `scripts/pg_backup.sh` + the `cryo-backup.timer` run inside WSL exactly as in
-`deployment.md` ("Database backups"). To let a Windows-side offsite job (e.g.
-Restic → NAS) pick the dumps up, point `CRYO_BACKUP_DIR` at a Windows-mounted path:
+`deployment.md` ("Database backups"), with one WSL-specific rule: **put the dumps
+on the Windows filesystem, outside the VM.** The whole distro — database included —
+lives in one `ext4.vhdx` file, so a `wsl --unregister` (a common WSL troubleshooting
+step) or vhdx corruption destroys the database *and* any backups stored inside the
+VM in one stroke. Point `CRYO_BACKUP_DIR` at a Windows-mounted path:
 
 ```bash
-# in /etc/cryostat-monitor/backup.env or the timer's EnvironmentFile
+# in /etc/cryostat-monitor/backup.env (loaded by cryo-backup.service)
 CRYO_BACKUP_DIR=/mnt/c/cryostat-monitor/backups
 ```
 
-Otherwise keep dumps in the WSL filesystem and run Restic inside WSL too.
+This also lets a Windows-side offsite job (e.g. Restic → NAS) pick the dumps up
+directly. Keeping dumps inside the WSL filesystem is discouraged — only defensible
+if something *outside* the VM copies them off nightly, and even then prefer `/mnt/c`.
+
+Create a **second healthchecks.io check** for the backup job and set its URL as
+`BACKUP_PING_URL` in the same `/etc/cryostat-monitor/backup.env` — the script pings
+it on success (`/fail` on failure), so a silently broken nightly backup pages
+instead of being discovered at restore time.
 
 ## Gotchas
 

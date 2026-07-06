@@ -1,7 +1,7 @@
 [Unit]
 Description=cryostat-monitor ingest service (FastAPI)
 After=network-online.target postgresql.service
-Wants=network-online.target
+Wants=network-online.target postgresql.service
 
 [Service]
 Type=simple
@@ -11,7 +11,9 @@ EnvironmentFile=/etc/cryostat-monitor/ingest.env
 # Bind to the LAN/tailnet interface only, never 0.0.0.0 on the public internet.
 ExecStart=/opt/cryostat-monitor/server/.venv/bin/uvicorn ingest.app:app \
     --host 127.0.0.1 --port 8000
-Restart=on-failure
+# `always`, not `on-failure`: a clean exit 0 would otherwise leave ingest down
+# until every fridge goes SILENT. Nothing exits this service on purpose.
+Restart=always
 RestartSec=5
 
 [Install]

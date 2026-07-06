@@ -1,7 +1,7 @@
 [Unit]
 Description=cryostat-monitor watchdog (deterministic alert path)
 After=network-online.target postgresql.service
-Wants=network-online.target
+Wants=network-online.target postgresql.service
 
 [Service]
 Type=simple

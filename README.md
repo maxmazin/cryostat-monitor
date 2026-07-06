@@ -151,6 +151,8 @@ What's needed next:
   labmanager with TLS and confirm reachability from a fridge host. On a Windows 10
   server host, run the stack under WSL2 (Ubuntu 24.04):
   [`docs/deployment-wsl.md`](./docs/deployment-wsl.md).
+- [`docs/deployment-daemon.md`](./docs/deployment-daemon.md) — install the host
+  daemon as an NSSM service on each Windows fridge host.
 
 See §10 of the spec for the full phased plan and §11 for open questions pending
 from Ben.
