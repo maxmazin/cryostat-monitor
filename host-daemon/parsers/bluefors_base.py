@@ -92,7 +92,8 @@ class BlueforsParser(Parser):
                 self._skip(source, line)
                 continue
             # Gauges follow the timestamp in groups of 6:
-            #   sensor(CHn), name(Pn), state, value(mbar), unit, enabled
+            #   sensor(CHn), name(Pn), state(0/1 = off/on), value(mbar),
+            #   status-code (Pfeiffer; 4 = sensor off), trailing constant 1
             # Buffer this line's readings and commit them only if the whole line
             # stays aligned: a misalignment partway through means the
             # 6-fields-per-gauge assumption is wrong for this firmware, so the
@@ -111,11 +112,15 @@ class BlueforsParser(Parser):
                     self._skip(source, line)
                     aligned = False
                     break
-                # A gauge is live iff its trailing `enabled` flag is "1". Do NOT
-                # gate on the `Pn` name being blank — some firmwares blank it on
-                # every line while the gauge is on (whitefridge does this), which
-                # would silently drop all its pressures.
-                if group[5].strip() != "1":
+                # A gauge is live iff its `state` field (3rd of the group) is
+                # "1". A state-0 gauge keeps logging a frozen placeholder value
+                # (real blackfridge logs: ` 2.00E-2` with status code 4 =
+                # sensor off) which must not ship as a live pressure. Do NOT
+                # gate on the trailing 6th field — it stays "1" even when the
+                # gauge is off — nor on the `Pn` name being blank: some
+                # firmwares blank it on every line while the gauge is on
+                # (whitefridge does this), which would drop all its pressures.
+                if group[2].strip() != "1":
                     continue
                 channel = GAUGE_CHANNEL.get(sensor)
                 if channel is None:

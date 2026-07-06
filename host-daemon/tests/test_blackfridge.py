@@ -61,33 +61,38 @@ def test_unmapped_thermometer_channel_is_skipped(parser):
 
 # --------------------------------------------------------------------------- pressures
 def test_maxigauge_parses_six_gauges(parser):
-    line = ("30-06-26,00:00:20,CH1,P1  ,0, 2.00E-2,4,1,CH2,P2  ,1, 7.04E-1,0,1,"
-            "CH3,P3  ,1,-6.00E+0,0,1,CH4,P4  ,1, 3.48E+2,0,1,CH5,P5  ,1, 6.99E+2,0,1,"
-            "CH6,P6,1, 1.05E+3,0,1,\r\n")
-    rows = parser.parse_new("maxigauge 26-06-30.log", [line])
+    # Real 26-06-20 sample line: every gauge on (state 1, status 0).
+    line = ("20-06-26,00:00:38,CH1,P1  ,1, 2.42E-6,0,1,CH2,P2  ,1, 1.17E-2,0,1,"
+            "CH3,P3  ,1, 7.58E+2,0,1,CH4,P4  ,1, 7.61E+2,0,1,CH5,P5  ,1, 5.74E+0,0,1,"
+            "CH6,P6,1, 3.85E+0,0,1,\r\n")
+    rows = parser.parse_new("maxigauge 26-06-20.log", [line])
     assert [r.channel for r in rows] == ["P1", "P2", "P3", "P4", "P5", "P6"]
     assert all(r.unit == "mbar" for r in rows)
-    assert rows[0].value == pytest.approx(0.02)     # P1
-    assert rows[5].value == pytest.approx(1050.0)   # P6
-    assert rows[0].ts == datetime(2026, 6, 30, 0, 0, 20)
+    assert rows[0].value == pytest.approx(2.42e-6)  # P1
+    assert rows[5].value == pytest.approx(3.85)     # P6
+    assert rows[0].ts == datetime(2026, 6, 20, 0, 0, 38)
 
 
 def test_maxigauge_skips_disabled_gauges(parser):
-    # Degraded line: gauges off -> trailing enabled flag 0 (and 0 value). Skip all.
+    # Degraded line: gauges off -> state field 0 (and 0 value). Skip all.
     line = ("30-06-26,14:17:04,CH1,,0, 0.00E+0,0,0,CH2,,0, 0.00E+0,0,0,"
             "CH3,,0, 0.00E+0,0,0,CH4,,0, 0.00E+0,0,0,CH5,,0, 0.00E+0,0,0,"
             "CH6,,0, 0.00E+0,0,0,\r\n")
     assert parser.parse_new("maxigauge 26-06-30.log", [line]) == []
 
 
-def test_maxigauge_ships_only_enabled_gauges(parser):
-    # Boundary the enabled-flag check governs: CH3 is disabled (trailing flag 0)
-    # among otherwise-live named gauges and must be dropped while the rest ship.
-    line = ("30-06-26,00:00:20,CH1,P1  ,1, 2.00E-2,4,1,CH2,P2  ,1, 7.04E-1,0,1,"
-            "CH3,P3  ,1,-6.00E+0,0,0,CH4,P4  ,1, 3.48E+2,0,1,CH5,P5  ,1, 6.99E+2,0,1,"
-            "CH6,P6,1, 1.05E+3,0,1,\r\n")
-    rows = parser.parse_new("maxigauge 26-06-30.log", [line])
-    assert [r.channel for r in rows] == ["P1", "P2", "P4", "P5", "P6"]  # P3 disabled
+def test_maxigauge_drops_state_off_gauge_keeps_state_on(parser):
+    # Real 26-06-24 sample line: CH1 turned OFF (state 0, Pfeiffer status 4) and
+    # its value froze at the placeholder 2.00E-2 — but the trailing 6th field is
+    # STILL 1. Gating on the trailing field (the old bug) shipped the frozen
+    # placeholder as a live pressure; gating on the state field drops P1 while
+    # keeping the state-1 gauges on the same line.
+    line = ("24-06-26,00:00:58,CH1,P1  ,0, 2.00E-2,4,1,CH2,P2  ,1, 1.32E-1,0,1,"
+            "CH3,P3  ,1,-6.00E+0,0,1,CH4,P4  ,1, 3.50E+2,0,1,CH5,P5  ,1, 7.32E+2,0,1,"
+            "CH6,P6,1, 2.40E+0,0,1,\r\n")
+    rows = parser.parse_new("maxigauge 26-06-24.log", [line])
+    assert [r.channel for r in rows] == ["P2", "P3", "P4", "P5", "P6"]
+    assert not any(r.value == pytest.approx(0.02) for r in rows)  # placeholder gone
 
 
 def test_maxigauge_misalignment_discards_whole_line(parser):

@@ -17,9 +17,12 @@ parser already tolerates all of them.
   ```
   30-06-26,00:00:02,CH1,        ,0,2.00e-02,4,1,CH2,        ,1,5.83e-02,0,1,...
   ```
-  Map gauges by **sensor position CH1..CH6** and decide on/off from the trailing
-  **enabled flag** (the 6th field of each gauge group), NOT the name — otherwise
-  every pressure is silently dropped.
+  Map gauges by **sensor position CH1..CH6** and decide on/off from the **state
+  field** (the 3rd field of each gauge group, 0/1), NOT the name — otherwise
+  every pressure is silently dropped. In the line above CH1 is OFF: state 0,
+  value frozen at the placeholder 2.00e-02, Pfeiffer status code 4 (= sensor
+  off) in the 5th field. The trailing 6th field stays 1 even for off gauges,
+  so it is NOT an enable flag.
 - **Cadence ≈ 10 s** (blackfridge ≈ 60 s). The watchdog `poll_interval` in
   fridges.yaml is the daemon's *reporting* cadence, not this log cadence.
 - **Extra `Heaters <date>.log`** file (` DD-MM-YY,HH:MM:SS,<n>,<float>,<n>,<float>`).

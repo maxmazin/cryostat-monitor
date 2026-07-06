@@ -35,9 +35,14 @@ software-build differences (lowercase/zero-padded exponents, blank gauge names).
 ```
 
 - No leading space. After the timestamp, **6 gauges × 6 fields**:
-  `sensor(CHn), name(Pn), state, value(mbar), unit?, enabled?`.
+  `sensor(CHn), name(Pn), state(0/1 = off/on), value(mbar), status-code, trailing 1`.
+- Gate on the **state** field (3rd of each group). A state-0 gauge keeps logging
+  a frozen placeholder — in the line above CH1 is off: state 0, value stuck at
+  ` 2.00E-2`, Pfeiffer status code 4 (= sensor off) — which must not ship as a
+  live pressure. The trailing 6th field stays 1 even then, so it is NOT an
+  enable flag (compare 26-06-20, CH1 on: `CH1,P1  ,1, 2.42E-6,0,1`).
 - Map by **sensor position CH1..CH6**, NOT the `Pn` name — degraded lines drop
-  the name: `…,CH1,,0, 0.00E+0,0,0,…` (gauges off). Skip/zero those.
+  the name: `…,CH1,,0, 0.00E+0,0,0,…` (gauges off). Skip those.
 
 ## Other files (not core readings)
 

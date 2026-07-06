@@ -4,7 +4,7 @@ whitefridge runs a different BlueFors software build than blackfridge. These
 tests pin the variant's gotchas (see samples/whitefridge/notes.md):
   - lowercase, zero-padded sci-notation and no leading space on CH lines;
   - maxigauge lines with BLANK gauge names while the gauges are live — the
-    pressures must still be shipped (keyed off the enabled flag, not the name).
+    pressures must still be shipped (keyed off the state field, not the name).
 """
 from __future__ import annotations
 
@@ -38,20 +38,22 @@ def test_lowercase_zeropadded_scinotation_no_leading_space(parser):
 
 # --------------------------------------------------------------------------- pressures
 def test_maxigauge_ships_pressures_despite_blank_names(parser):
-    # Real whitefridge line: every gauge name is blank, but all are enabled (last
-    # field 1) with real values. The previous blank-name heuristic dropped them all.
+    # Real whitefridge line: every gauge name is blank. CH2..CH6 are on (state 1)
+    # and must ship despite the blank names (an old blank-name heuristic dropped
+    # them all). CH1 is OFF — state 0, Pfeiffer status 4, value frozen at the
+    # 2.00e-02 placeholder — and must NOT ship even though its trailing field is 1.
     line = ("30-06-26,00:00:02,CH1,        ,0,2.00e-02,4,1,CH2,        ,1,5.83e-02,0,1,"
             "CH3,        ,1,9.12e+00,0,1,CH4,        ,1,2.73e+02,0,1,"
             "CH5,        ,1,7.56e+02,0,1,CH6,        ,1,1.75e+00,0,1,\r\n")
     rows = parser.parse_new("maxigauge 26-06-30.log", [line])
-    assert [r.channel for r in rows] == ["P1", "P2", "P3", "P4", "P5", "P6"]
+    assert [r.channel for r in rows] == ["P2", "P3", "P4", "P5", "P6"]
     assert all(r.unit == "mbar" for r in rows)
-    assert rows[0].value == pytest.approx(0.02)
-    assert rows[3].value == pytest.approx(273.0)
+    assert rows[0].value == pytest.approx(0.0583)
+    assert rows[2].value == pytest.approx(273.0)
 
 
 def test_maxigauge_skips_disabled_gauge_even_when_blank(parser):
-    # A blank-named gauge with enabled flag 0 is off -> skipped; the enabled one ships.
+    # A blank-named gauge with state 0 is off -> skipped; the state-1 one ships.
     line = ("30-06-26,00:00:02,CH1,        ,0,0.00e+00,0,0,CH2,        ,1,5.83e-02,0,1,"
             "CH3,        ,0,0.00e+00,0,0,CH4,        ,0,0.00e+00,0,0,"
             "CH5,        ,0,0.00e+00,0,0,CH6,        ,0,0.00e+00,0,0,\r\n")

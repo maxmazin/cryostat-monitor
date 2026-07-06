@@ -1,4 +1,5 @@
-"""Tests for the local SQLite spool — idempotency, ack lifecycle, pruning."""
+"""Tests for the local SQLite spool — idempotency, ack lifecycle, pruning,
+corruption recovery."""
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
@@ -6,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from parsers.base import Reading
-from spool import Spool
+from spool import Spool, open_or_recover
 
 UTC = timezone.utc
 
@@ -61,3 +62,61 @@ def test_prune_removes_old_acked_only(spool):
     spool.append([_reading(0)])                       # re-add old as unacked
     assert spool.prune(cutoff) == 0
     assert len(spool.unacked()) == 1
+
+
+# --------------------------------------------------------------------------- corruption recovery
+def test_open_or_recover_quarantines_corrupt_db(tmp_path, caplog):
+    # A corrupt spool.sqlite must not crash-loop the daemon: the file is
+    # quarantined — renamed, not deleted, so buffered-but-unsent rows stay on
+    # disk for manual recovery — and a fresh spool works. (A stale -wal sidecar
+    # may already be unlinked by sqlite itself during the failed open; the
+    # recovery renames whichever sidecars still exist.)
+    garbage = b"definitely not a sqlite database " * 8
+    path = tmp_path / "spool.sqlite"
+    path.write_bytes(garbage)
+    (tmp_path / "spool.sqlite-wal").write_bytes(b"stale wal junk")
+
+    spool = open_or_recover(str(path))
+    spool.append([_reading(0)])
+    assert len(spool.unacked()) == 1          # fresh spool is functional
+    spool.close()
+
+    quarantined = [p for p in tmp_path.glob("spool.sqlite.corrupt-*")
+                   if not p.name.endswith(("-wal", "-shm"))]
+    assert len(quarantined) == 1                     # the corrupt db was renamed...
+    assert quarantined[0].read_bytes() == garbage    # ...with its bytes intact
+    assert not (tmp_path / "spool.sqlite-wal").exists()   # no stale sidecar left
+    assert any("quarantin" in r.getMessage() for r in caplog.records)
+
+
+def test_open_or_recover_reraises_transient_lock_without_quarantine(tmp_path, monkeypatch):
+    # "database is locked" (AV/backup holding the file) is transient, not
+    # corruption: quarantining a healthy spool would silently drop its un-acked
+    # rows from the pipeline. The error must propagate so the caller retries.
+    import sqlite3
+
+    import spool as spool_module
+
+    path = tmp_path / "spool.sqlite"
+    Spool(str(path)).close()            # a real, healthy spool file
+
+    def locked(_path):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(spool_module, "Spool", locked)
+    with pytest.raises(sqlite3.OperationalError):
+        open_or_recover(str(path))
+    assert path.exists()                                    # untouched
+    assert not list(tmp_path.glob("*.corrupt-*"))           # no quarantine
+
+
+def test_open_or_recover_leaves_healthy_db_alone(tmp_path):
+    path = tmp_path / "spool.sqlite"
+    first = Spool(str(path))
+    first.append([_reading(0)])
+    first.close()
+
+    spool = open_or_recover(str(path))
+    assert len(spool.unacked()) == 1          # existing rows preserved
+    spool.close()
+    assert list(tmp_path.glob("*.corrupt-*")) == []

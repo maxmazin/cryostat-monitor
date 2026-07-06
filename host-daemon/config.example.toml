@@ -26,9 +26,12 @@ spool_retain_days = 7                               # prune acked rows older tha
 
 # First-run backfill. A BlueFors tree can hold YEARS of dated folders; by default
 # the daemon skips that history and ships only data written from deployment onward
-# (plus the current day), so first start doesn't slurp years into memory or flood
-# the server. A newly-seen file modified within backfill_window_days is still
-# picked up, which also lets a short outage catch up. Set backfill=true to send the
-# entire history instead.
+# (plus the current day), so first start doesn't flood the server. A newly-seen
+# file modified within backfill_window_days is still picked up. The window is
+# anchored to the daemon's LAST SUCCESSFUL CYCLE (persisted in offsets.json), not
+# the current clock, so an outage longer than the window still catches up
+# everything written while the daemon was down; only true first runs skip history.
+# Set backfill=true to send the entire history instead — it drains incrementally
+# over many cycles under a per-cycle read budget.
 backfill             = false
 backfill_window_days = 2

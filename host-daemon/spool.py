@@ -11,10 +11,15 @@ processed, no duplicate rows accumulate. The server is also idempotent on
 """
 from __future__ import annotations
 
+import logging
+import os
 import sqlite3
+import time
 from datetime import datetime, timezone
 
 from parsers.base import Reading
+
+log = logging.getLogger("cryo.spool")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS spool (
@@ -37,9 +42,15 @@ def _iso_utc(ts: datetime) -> str:
 class Spool:
     def __init__(self, path: str) -> None:
         self.conn = sqlite3.connect(path)
-        self.conn.execute("PRAGMA journal_mode=WAL")   # survive crashes mid-write
-        self.conn.executescript(SCHEMA)
-        self.conn.commit()
+        try:
+            self.conn.execute("PRAGMA journal_mode=WAL")   # survive crashes mid-write
+            self.conn.executescript(SCHEMA)
+            self.conn.commit()
+        except sqlite3.DatabaseError:
+            # Close before re-raising so open_or_recover can rename the file
+            # (Windows refuses to rename a file with an open handle).
+            self.conn.close()
+            raise
 
     def append(self, readings: list[Reading]) -> None:
         """Append readings as un-acked rows. Idempotent on (channel, ts)."""
@@ -82,3 +93,32 @@ class Spool:
 
     def close(self) -> None:
         self.conn.close()
+
+
+def open_or_recover(path: str) -> Spool:
+    """Open the spool; if the database file is corrupt, quarantine it and start
+    fresh.
+
+    A corrupt spool.sqlite (power loss, disk fault, AV interference) would
+    otherwise raise out of Spool() at startup, NSSM would restart the daemon,
+    and it would crash again forever — the fridge goes dark. The corrupt file
+    and its WAL/SHM sidecars are renamed (not deleted), so buffered-but-unsent
+    rows are preserved on disk for manual recovery while monitoring resumes.
+    """
+    try:
+        return Spool(path)
+    except sqlite3.OperationalError:
+        # "database is locked" / "disk I/O error": transient, not corruption.
+        # Quarantining a healthy spool would silently drop its un-acked rows
+        # from the pipeline; let the caller retry instead.
+        raise
+    except sqlite3.DatabaseError as exc:
+        quarantine = f"{path}.corrupt-{int(time.time())}"
+        log.error("spool %s is corrupt (%s); quarantining to %s and starting a "
+                  "fresh spool — recover unsent rows from the quarantined file "
+                  "manually if needed", path, exc, quarantine)
+        for suffix in ("", "-wal", "-shm"):
+            src = path + suffix
+            if os.path.exists(src):
+                os.replace(src, quarantine + suffix)
+        return Spool(path)
