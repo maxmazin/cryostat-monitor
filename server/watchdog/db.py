@@ -88,13 +88,19 @@ def last_seen(fridge: str) -> LastSeen | None:
 
 
 def latest_reading(fridge: str, channel: str) -> LatestReading | None:
-    """Most recent reading for (fridge, channel), or None."""
+    """Most recent reading for (fridge, channel), or None.
+
+    Rows with a far-future data ts are excluded: ORDER BY ts DESC would otherwise
+    let one clock-skewed row pin this result — and freeze the watchdog's
+    threshold input — even after the host clock is fixed. Ingest also rejects
+    far-future rows; this guard survives rows that predate that check."""
     pool = _get_pool()
     with pool.connection() as conn:
         row = conn.execute(
             """
             SELECT value, ts, unit FROM readings
             WHERE fridge = %s AND channel = %s
+              AND ts <= now() + interval '24 hours'
             ORDER BY ts DESC
             LIMIT 1
             """,
@@ -120,6 +126,15 @@ def get_alert_state(fridge: str, key: str) -> AlertRow | None:
     if row is None:
         return None
     return AlertRow(state=row[0], since=row[1], last_notified=row[2])
+
+
+def list_alert_keys() -> list[tuple[str, str]]:
+    """All (fridge, alert_key) pairs in alert_state — used at startup to warn
+    about rows left dangling after config changes."""
+    pool = _get_pool()
+    with pool.connection() as conn:
+        rows = conn.execute("SELECT fridge, alert_key FROM alert_state").fetchall()
+    return [(row[0], row[1]) for row in rows]
 
 
 def upsert_alert_state(

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -99,6 +99,19 @@ def test_latest_reading_absent_returns_none(fridge):
     assert db.latest_reading(fridge, "MXC") is None
 
 
+def test_latest_reading_ignores_far_future_ts(fridge):
+    # A clock-skewed far-future row must not pin the "latest" reading (defense in
+    # depth alongside ingest's own far-future rejection).
+    t_now = datetime.now(timezone.utc)
+    t_future = t_now + timedelta(days=30)
+    _exec("INSERT INTO readings (ts, fridge, channel, value, unit) VALUES (%s,%s,%s,%s,%s)",
+          (t_now, fridge, "MXC", 0.01, "K"))
+    _exec("INSERT INTO readings (ts, fridge, channel, value, unit) VALUES (%s,%s,%s,%s,%s)",
+          (t_future, fridge, "MXC", 99.0, "K"))
+    latest = db.latest_reading(fridge, "MXC")
+    assert latest is not None and latest.value == 0.01
+
+
 def test_alert_state_roundtrip_and_upsert(fridge):
     assert db.get_alert_state(fridge, "SILENT") is None
     since = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -109,3 +122,9 @@ def test_alert_state_roundtrip_and_upsert(fridge):
     db.upsert_alert_state(fridge, "SILENT", "OK", since, None)
     row = db.get_alert_state(fridge, "SILENT")
     assert row.state == "OK" and row.last_notified is None
+
+
+def test_list_alert_keys_returns_persisted_rows(fridge):
+    since = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    db.upsert_alert_state(fridge, "STALE:MXC", "ALERTING", since, None)
+    assert (fridge, "STALE:MXC") in db.list_alert_keys()

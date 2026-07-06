@@ -3,15 +3,31 @@
 #
 # Units: temperatures in kelvin, pressures in mbar (canonical, see schema.sql).
 #
+# Validated at startup (the watchdog refuses to start, crash-looping under
+# systemd so the healthchecks dead-man fires, rather than running disarmed):
+#   - a lifecycle block accepts ONLY the keys channel / cooling_start_k /
+#     base_temperature_k / warming_start_k / room_temperature_k / unit (a typo
+#     like `warming_stat_k` would silently fall back to the default and disarm
+#     the intended trigger)
+#   - lifecycle temperatures must satisfy base_temperature_k < warming_start_k
+#     < cooling_start_k < room_temperature_k
+#   - at least one fridge must be configured
+#   - the Slack webhook env var must be set and healthchecks_url must be real
+#     (the REPLACE-WITH-UUID placeholder counts as unset)
+#
 # staleness: a fridge is SILENT when
 #     now() - last_seen > staleness_factor * poll_interval
 # poll_interval is the host daemon's reporting cadence in seconds.
 #
-# Slack policy: only lifecycle transitions page Slack:
+# Slack policy: lifecycle transitions page Slack:
 #   ROOM -> COOLING     when lifecycle.channel drops below cooling_start_k
 #   COOLING -> BASE     when it reaches base_temperature_k
 #   BASE -> WARMING     when it rises above warming_start_k
 #   WARMING -> ROOM     when it reaches room_temperature_k
+# ...plus ONE fault alert: STALE, when the lifecycle channel's newest sample is
+# older than the SILENT window while the fridge itself is still reporting. A
+# frozen reading would silently pin the phase (a fridge warming unseen would
+# never page), so it escalates like a fault: raise/remind/resolve, mute-aware.
 
 watchdog:
   check_interval: 15          # seconds between watchdog loops
@@ -55,7 +71,9 @@ fridges:
   # Only list a fridge here once its host daemon is deployed and reporting. The
   # watchdog SILENT-alarms on any configured fridge it has never seen, so a
   # fridge with no data source (e.g. one still awaiting its parser) would page
-  # continuously. Add each of the following when its daemon goes live:
+  # continuously. (Commenting out ALL fridges makes the watchdog refuse to
+  # start — it must never heartbeat while monitoring nothing.) Add each of the
+  # following when its daemon goes live:
   #
   # ADRs differ: no still/MXC; expect magnet/regen channels and deliberate
   # warmups (handle via maintenance mutes — see §11 Q4). adr_2's parser is still

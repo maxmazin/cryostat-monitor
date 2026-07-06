@@ -3,7 +3,7 @@
 Unlike test_watchdog.py (which fakes the DB), these run check_once() through the
 REAL db layer against a live PostgreSQL AND real HTTP: the Slack webhook and the
 healthchecks.io heartbeat are pointed at a local capture server. This exercises
-the whole loop — config, SQL reads/writes, the state machine, Slack delivery,
+the whole loop — config, SQL reads/writes, the state machines, Slack delivery,
 and the heartbeat — the way it will run on labmanager.
 
 Each lifecycle acceptance criterion maps to a test below:
@@ -14,6 +14,7 @@ Each lifecycle acceptance criterion maps to a test below:
   - warming -> room Slack event           : test_lifecycle_reaches_room
   - maintenance mute -> Slack suppressed  : test_maintenance_mute_suppresses_lifecycle
   - restart mid-state -> no re-spam       : test_restart_mid_lifecycle_does_not_respam
+  - frozen lifecycle channel -> STALE     : test_stale_lifecycle_channel_alerts_and_clears
   - heartbeat every loop (dead-man)       : test_heartbeat_pings_every_loop
 
 Gated on CRYO_TEST_DSN, same as the other integration tests.
@@ -253,6 +254,40 @@ def test_restart_mid_lifecycle_does_not_respam(capture, fridge):
     wd.check_once(_cfg(capture, fridge))
     assert capture.slack == []                # no re-page
     assert capture.beats == 1
+
+
+def test_stale_lifecycle_channel_alerts_and_clears(capture, fridge):
+    cfg = _cfg(capture, fridge)
+    # The fridge is reporting (fresh last_seen) but its lifecycle channel froze
+    # 20+ minutes ago: STALE pages, and the phase is NOT inferred from the
+    # frozen value.
+    capture.reset()
+    _preset_lifecycle(fridge, wd.PHASE_BASE)
+    _set_last_seen(fridge, age_seconds=5)
+    _add_reading(fridge, 0.025, datetime.now(UTC) - timedelta(minutes=20))
+    wd.check_once(cfg)
+    assert any("STALE" in m for m in capture.slack), capture.slack
+    assert db.get_alert_state(fridge, wd.STALE_PREFIX + "MXC").state == "ALERTING"
+    assert db.get_alert_state(fridge, wd.LIFECYCLE_KEY).state == wd.PHASE_BASE
+
+    # Fresh data returns: the RESOLVED is held (flap damping) — no message yet.
+    capture.reset()
+    _set_last_seen(fridge, age_seconds=5)
+    _add_reading(fridge, 0.025, datetime.now(UTC) - timedelta(seconds=30))
+    wd.check_once(cfg)
+    assert capture.slack == []
+    assert db.get_alert_state(fridge, wd.STALE_PREFIX + "MXC").state == "ALERTING"
+
+    # Once continuously fresh past the hold, a single RESOLVED goes out. Shift
+    # the watchdog clock instead of sleeping; move last_seen and the data with
+    # it so nothing looks stale at the shifted now.
+    capture.reset()
+    later = datetime.now(UTC) + timedelta(seconds=wd.CLEAR_HOLD_SECONDS + 10)
+    _set_last_seen(fridge, age_seconds=-(wd.CLEAR_HOLD_SECONDS + 5))
+    _add_reading(fridge, 0.025, later - timedelta(seconds=30))
+    wd.check_once(cfg, now=later)
+    assert any("RESOLVED" in m for m in capture.slack), capture.slack
+    assert db.get_alert_state(fridge, wd.STALE_PREFIX + "MXC").state == "OK"
 
 
 def test_heartbeat_pings_every_loop(capture, fridge):
